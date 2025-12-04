@@ -1,0 +1,2 @@
+# migux
+my own ngnix
