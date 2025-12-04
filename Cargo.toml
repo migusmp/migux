@@ -1,13 +1,169 @@
 [workspace]
 resolver = "3"
+
 members = [
-    "crates/core",
-    "crates/config",
-    "crates/http",
-    "crates/parser",
-    "crates/router",
-    "crates/static",
-    "crates/proxy",
-    "crates/utils",
-    "migux", "migux",
+    # -----------------------------------------
+    # MAIN BINARY (THE NGINX-LIKE SERVER)
+    # -----------------------------------------
+    "migux",                 # Main binary.
+                             # Contains main.rs and boots the whole server:
+                             # - Loads configuration
+                             # - Initializes logging
+                             # - Starts listeners
+                             # - Runs router, proxy, and static handlers
+    
+
+    # -----------------------------------------
+    # WORKSPACE CRATES (SERVER LOGIC)
+    # -----------------------------------------
+
+    "crates/core",           # CORE:
+                             # Base types, global errors, constants,
+                             # internal server model and abstractions.
+
+    "crates/config",         # CONFIG:
+                             # Loads and parses migux.conf (.toml, .yaml),
+                             # configuration models, validation, etc.
+
+    "crates/http",           # HTTP:
+                             # Low-level HTTP/1.1 networking layer.
+                             # Socket handling, request/response types,
+                             # buffers, lightweight parsing, etc.
+
+    "crates/parser",         # PARSER:
+                             # Specialized parsers:
+                             # - Raw HTTP parser (httparse)
+                             # - Nginx-style location/block parser
+                             # - Header parsers
+
+    "crates/router",         # ROUTER:
+                             # Request routing system (host, server, location),
+                             # route matching, handler selection,
+                             # Nginx-like rules (prefix, exact, regex).
+
+    "crates/static",         # STATIC:
+                             # Static file server:
+                             # - Efficient file reading
+                             # - MIME type detection
+                             # - Optional caching
+                             # - Directory index support
+
+    "crates/proxy",          # PROXY:
+                             # Reverse proxy:
+                             # - Connects to upstream HTTP servers
+                             # - Streams request/response bodies
+                             # - Handles keep-alive, buffering and timeouts
+
+    "crates/utils",          # UTILS:
+                             # Utility functions:
+                             # - I/O helpers
+                             # - Path helpers
+                             # - Common transformations
+                             # - Extensions and small tools
 ]
+
+# =======================================================
+# SHARED WORKSPACE DEPENDENCIES
+# Libraries available to all crates
+# =======================================================
+[workspace.dependencies]
+
+# ------------------------------
+# ASYNC RUNTIME (Tokio stack)
+# ------------------------------
+
+tokio = { version = "1", features = ["full", "macros"] }
+# Tokio → Rust's async runtime. Handles event loop, TCP sockets,
+# timers, tasks, non-blocking I/O. The engine of your mini-Nginx.
+
+tokio-util = "0.7"
+# Extra utilities for Tokio: codecs, stream adapters, compat tools.
+
+tokio-stream = "0.1"
+# Async streams (like async iterators). Useful for websockets,
+# chunked bodies, file streaming, etc.
+
+mio = "1"
+# Low-level OS I/O (epoll/kqueue) abstraction.
+# Tokio is built on top of Mio. Useful if you ever go full low-level.
+
+# ------------------------------
+# HTTP SERVER / NETWORKING
+# ------------------------------
+
+hyper = { version = "1", features = ["full"] }
+# Hyper → extremely fast, non-blocking HTTP server.
+# Perfect for building your own Nginx-like server.
+# Handles connections, headers, HTTP/1.1 + HTTP/2, etc.
+
+http = "1"
+# Pure HTTP types (Request, Response, Method, HeaderMap, etc.)
+# No runtime. Used internally by Hyper and great for your `http` crate.
+
+httparse = "1"
+# Minimalist HTTP parser written in Rust.
+# Ideal if you want to implement your own raw HTTP parser (like Nginx).
+
+bytes = "1"
+# Efficient byte buffer handling. Critical for network I/O,
+# heavy data streaming, and non-blocking reads/writes.
+
+# ------------------------------
+# FILE PARSING & MIME TYPES
+# ------------------------------
+
+mime_guess = "2"
+# Detects MIME types based on file extension.
+# Useful for serving static files.
+
+toml = "0.8"
+# TOML parser → ideal for migux.conf.
+
+yaml-rust = "0.4"
+# YAML parser → enables Nginx-style configuration:
+#   server:
+#       listen: 8080
+#       root: www/
+
+# ------------------------------
+# SERIALIZATION / DESERIALIZATION
+# ------------------------------
+
+serde = { version = "1", features = ["derive"] }
+# Serde → extremely fast (de)serialization framework.
+# Lets you load config files, JSON logs, TOML settings, etc.
+
+serde_json = "1"
+# Optimized JSON parser. Great for logs, dynamic configs,
+# or user-facing JSON endpoints (if you implement any).
+
+# ------------------------------
+# PROFESSIONAL ERROR HANDLING
+# ------------------------------
+
+anyhow = "1"
+# Easy error handling for internal layers.
+# Lets you return Result<T, anyhow::Error> without boilerplate.
+
+thiserror = "1"
+# Derive-based error definitions:
+#
+#   #[derive(thiserror::Error)]
+#   enum MyError {
+#       #[error("invalid config: {0}")]
+#       Config(String),
+#   }
+
+# ------------------------------
+# ADVANCED LOGGING
+# ------------------------------
+
+tracing = "0.1"
+# Modern async logging system.
+# Much better than println!. Supports spans, contexts, exporters.
+
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Lets you filter logs by environment variable:
+#   RUST_LOG=migux=debug cargo run
+
+config = "0.14"

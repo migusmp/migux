@@ -1,3 +1,6 @@
+use config::MiguxConfig;
+
 fn main() {
-    println!("Hello, world!");
+    let migux_cfg = MiguxConfig::from_file("migux.conf");
+    migux_cfg.print();
 }
