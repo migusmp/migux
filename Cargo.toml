@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/config",
+    "crates/http",
+    "crates/parser",
+    "crates/router",
+    "crates/static",
+    "crates/proxy",
+    "crates/utils",
+    "migux", "migux",
+]

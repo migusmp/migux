@@ -1,0 +1,58 @@
+# ==========================================
+# RUST WORKSPACE IGNORE
+# Solo ignoramos target/ de la raíz
+# ==========================================
+/target
+
+# Archivos de compilación temporales de Rust
+**/*.rs.bk
+
+# Archivos generados por rustfmt
+**/*.rs.orig
+
+# ==========================================
+# CONFIG & ENTORNO
+# ==========================================
+.env
+.env.*
+!.env.example
+migux.conf
+migux.conf.local
+migux.conf.dev
+
+# ==========================================
+# LOGS
+# ==========================================
+*.log
+logs/
+var/
+
+# ==========================================
+# EDITORES / IDEs
+# ==========================================
+
+# VSCode
+.vscode/
+.history/
+
+# JetBrains / IntelliJ / CLion
+.idea/
+*.iml
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Emacs
+*~
+
+# ==========================================
+# SISTEMA
+# ==========================================
+.DS_Store
+Thumbs.db
