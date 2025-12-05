@@ -88,6 +88,23 @@ impl Default for ServerConfig {
 }
 
 // =======================================================
+// LOCATION TYPE (enum tipado)
+// =======================================================
+#[derive(Debug, Deserialize)]
+pub enum LocationType {
+    #[serde(rename = "static")]
+    Static,
+    #[serde(rename = "proxy")]
+    Proxy,
+}
+
+impl Default for LocationType {
+    fn default() -> Self {
+        LocationType::Static
+    }
+}
+
+// =======================================================
 // LOCATION CONFIG + DEFAULTS
 // =======================================================
 #[derive(Debug, Deserialize)]
@@ -95,7 +112,7 @@ impl Default for ServerConfig {
 pub struct LocationConfig {
     pub server: String,
     pub path: String,
-    pub r#type: String,       // static | proxy
+    pub r#type: LocationType, // static | proxy
     pub root: Option<String>, // solo para static
     pub index: Option<String>,
     pub upstream: Option<String>,
@@ -107,7 +124,7 @@ impl Default for LocationConfig {
         Self {
             server: "main".into(),
             path: "/".into(),
-            r#type: "static".into(),
+            r#type: LocationType::Static,
             root: None,
             index: None,
             upstream: None,
@@ -137,67 +154,98 @@ pub struct MiguxConfig {
     pub location: HashMap<String, LocationConfig>,
 }
 
-impl MiguxConfig {
-    pub fn default() -> Self {
-        Self::from_file("migux.conf")
+// Default “en memoria”: sin leer fichero
+impl Default for MiguxConfig {
+    fn default() -> Self {
+        let mut cfg = Self {
+            global: GlobalConfig::default(),
+            http: HttpConfig::default(),
+            upstream: HashMap::new(),
+            server: HashMap::new(),
+            location: HashMap::new(),
+        };
+        cfg.apply_defaults();
+        cfg
     }
+}
 
-    pub fn from_file(file_name: &str) -> Self {
-        let mut cfg: MiguxConfig = config::Config::builder()
+impl MiguxConfig {
+    /// Cargar configuración desde un fichero INI.
+    /// Devuelve Result para que el caller decida qué hacer con los errores.
+    pub fn from_file(file_name: &str) -> Result<Self, config::ConfigError> {
+        let built = config::Config::builder()
             .add_source(
                 config::File::new(file_name, config::FileFormat::Ini).required(false), // si no existe, no peta
             )
-            .build()
-            .unwrap()
-            .try_deserialize()
-            .unwrap();
+            .build()?; // Propaga error de build
+
+        let mut cfg: MiguxConfig = built.try_deserialize()?; // Propaga error de parseo
 
         cfg.apply_defaults();
-        cfg
+        Ok(cfg)
+    }
+
+    /// Fallback cómodo: intenta leer fichero, y si falla,
+    /// usa MiguxConfig::default().
+    pub fn from_file_or_default(file_name: &str) -> Self {
+        match Self::from_file(file_name) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("⚠️  Error leyendo configuración '{file_name}': {e}");
+                eprintln!("➡️  Usando configuración por defecto (in-memory)...");
+                MiguxConfig::default()
+            }
+        }
     }
 
     fn apply_defaults(&mut self) {
         // GLOBAL
+        let def_global = GlobalConfig::default();
+
         if self.global.worker_processes == 0 {
-            self.global.worker_processes = GlobalConfig::default().worker_processes;
+            self.global.worker_processes = def_global.worker_processes;
         }
         if self.global.worker_connections == 0 {
-            self.global.worker_connections = GlobalConfig::default().worker_connections;
+            self.global.worker_connections = def_global.worker_connections;
         }
         if self.global.log_level.is_empty() {
-            self.global.log_level = GlobalConfig::default().log_level;
+            self.global.log_level = def_global.log_level.clone();
         }
         if self.global.error_log.is_empty() {
-            self.global.error_log = GlobalConfig::default().error_log;
+            self.global.error_log = def_global.error_log.clone();
         }
 
         // HTTP
+        let def_http = HttpConfig::default();
+
         if self.http.access_log.is_empty() {
-            self.http.access_log = HttpConfig::default().access_log;
+            self.http.access_log = def_http.access_log.clone();
         }
+        // (Opcional) si quieres evitar keepalive = 0:
+        // if self.http.keepalive_timeout_secs == 0 {
+        //     self.http.keepalive_timeout_secs = def_http.keepalive_timeout_secs;
+        // }
 
         // SERVERS
+        let def_server = ServerConfig::default();
+
         for (_, s) in &mut self.server {
             if s.listen.is_empty() {
-                s.listen = ServerConfig::default().listen;
+                s.listen = def_server.listen.clone();
             }
             if s.server_name.is_empty() {
-                s.server_name = ServerConfig::default().server_name;
+                s.server_name = def_server.server_name.clone();
             }
             if s.root.is_empty() {
-                s.root = ServerConfig::default().root;
+                s.root = def_server.root.clone();
             }
             if s.index.is_empty() {
-                s.index = ServerConfig::default().index;
+                s.index = def_server.index.clone();
             }
         }
 
         // LOCATIONS
         for (_, l) in &mut self.location {
-            if l.r#type.is_empty() {
-                l.r#type = "static".into();
-            }
-
             // Default root = root del server al que pertenece
             if l.root.is_none() {
                 if let Some(srv) = self.server.get(&l.server) {
@@ -211,6 +259,12 @@ impl MiguxConfig {
                     l.index = Some(srv.index.clone());
                 }
             }
+
+            // Si el tipo es Proxy, idealmente upstream debería ser Some(...)
+            // Aquí podrías loggear un warning si falta.
+            // if matches!(l.r#type, LocationType::Proxy) && l.upstream.is_none() {
+            //     eprintln!("⚠️  Location '{}' es proxy pero no tiene upstream", l.path);
+            // }
         }
     }
 
@@ -256,7 +310,10 @@ impl MiguxConfig {
             println!("  location {}:", name);
             println!("    server       = {}", loc.server);
             println!("    path         = {}", loc.path);
-            println!("    type         = {}", loc.r#type);
+            println!(
+                "    type         = {:?}",
+                loc.r#type // enum, lo mostramos con Debug
+            );
             println!("    root         = {:?}", loc.root);
             println!("    index        = {:?}", loc.index);
             println!("    upstream     = {:?}", loc.upstream);
@@ -282,5 +339,11 @@ mod tests {
     fn it_works() {
         let result = add(2, 2);
         assert_eq!(result, 4);
+    }
+
+    #[test]
+    fn default_config_builds() {
+        let cfg = MiguxConfig::default();
+        assert!(cfg.global.worker_processes >= 1);
     }
 }

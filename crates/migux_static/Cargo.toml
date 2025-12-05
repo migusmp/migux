@@ -1,0 +1,9 @@
+[package]
+name = "migux_static"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+migux_http = { path = "../migux_http" }
+tokio = { workspace = true }
+mime_guess = { workspace = true }

@@ -1,6 +1,16 @@
-use config::MiguxConfig;
+use migux_config::MiguxConfig;
 
-fn main() {
-    let migux_cfg = MiguxConfig::from_file("migux.conf");
-    migux_cfg.print();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cfg = match MiguxConfig::from_file("migux.conf") {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Error leyendo migux.conf: {e}");
+            eprintln!("Continuando con configuración por defecto...");
+            MiguxConfig::default()
+        }
+    };
+    cfg.print();
+
+    Ok(())
 }

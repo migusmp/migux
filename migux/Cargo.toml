@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 core = { path = "../crates/core" }
-config = { path = "../crates/config" }
-http-core = { package = "http", path = "../crates/http" }
+migux_config = { path = "../crates/migux_config" }
+migux_http = { path = "../crates/migux_http" }
 parser = { path = "../crates/parser" }
-router = { path = "../crates/router" }
-static-files = { package = "migux-static", path = "../crates/static" }
+migux_router = { path = "../crates/migux_router" }
+migux_static = { path = "../crates/migux_static" }
 proxy = { path = "../crates/proxy" }
 utils = { path = "../crates/utils" }
 

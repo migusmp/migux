@@ -21,11 +21,11 @@ members = [
                              # Base types, global errors, constants,
                              # internal server model and abstractions.
 
-    "crates/config",         # CONFIG:
+    "crates/migux_config",         # CONFIG:
                              # Loads and parses migux.conf (.toml, .yaml),
                              # configuration models, validation, etc.
 
-    "crates/http",           # HTTP:
+    "crates/migux_http",           # HTTP:
                              # Low-level HTTP/1.1 networking layer.
                              # Socket handling, request/response types,
                              # buffers, lightweight parsing, etc.
@@ -36,12 +36,12 @@ members = [
                              # - Nginx-style location/block parser
                              # - Header parsers
 
-    "crates/router",         # ROUTER:
+    "crates/migux_router",         # ROUTER:
                              # Request routing system (host, server, location),
                              # route matching, handler selection,
                              # Nginx-like rules (prefix, exact, regex).
 
-    "crates/static",         # STATIC:
+    "crates/migux_static",         # STATIC:
                              # Static file server:
                              # - Efficient file reading
                              # - MIME type detection
@@ -167,3 +167,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 #   RUST_LOG=migux=debug cargo run
 
 config = "0.14"
+dashmap = "6.1.0"
