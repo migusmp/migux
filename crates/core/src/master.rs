@@ -2,7 +2,11 @@ use std::{sync::Arc, time::Duration};
 
 use dashmap::{self, DashMap};
 use migux_config::MiguxConfig;
-use tokio::{net::TcpListener, sync::Semaphore};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::Semaphore,
+};
 
 use crate::{build_servers_by_listen, ServersByListen};
 
@@ -101,10 +105,46 @@ async fn accept_loop(
     }
 }
 
-async fn handle_connection(stream: tokio::net::TcpStream) -> anyhow::Result<()> {
-    // De momento solo registramos y cerramos.
-    // Aquí luego meteremos: leer request, parsear, router, static/proxy, etc.
-    println!("[worker] handling connection...");
-    drop(stream);
+async fn handle_connection(mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+    // 1. Leer algunos bytes de la request
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+
+    if n == 0 {
+        // El cliente se ha ido
+        return Ok(());
+    }
+
+    let req_str = String::from_utf8_lossy(&buf[..n]);
+
+    // 2. Sacar la primera línea: "GET / HTTP/1.1"
+    if let Some(first_line) = req_str.lines().next() {
+        println!("[worker] request line: {}", first_line);
+
+        // Intentamos separar método y path
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next().unwrap_or("-");
+        let path = parts.next().unwrap_or("-");
+        println!("[worker] method = {}, path = {}", method, path);
+    } else {
+        println!("[worker] request sin primera línea?");
+    }
+
+    // 3. Responder algo sencillo (HTTP 200)
+    let body = b"Hello from Migux!\n";
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        body.len()
+    );
+
+    stream.write_all(response.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+
     Ok(())
 }
