@@ -12,3 +12,4 @@ migux_static = { path="../migux_static" }
 dashmap = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }

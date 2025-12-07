@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use dashmap::{self, DashMap};
 use migux_config::MiguxConfig;
 use tokio::{net::TcpListener, sync::Semaphore};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::{build_servers_by_listen, worker::handle_connection, ServerRuntime, ServersByListen};
 
@@ -18,6 +19,7 @@ impl CacheStore {
     }
 }
 
+#[allow(dead_code)]
 pub struct Master {
     cfg: Arc<MiguxConfig>,
     servers_by_listen: Arc<ServersByListen>,
@@ -36,30 +38,63 @@ impl Master {
         }
     }
 
+    /// Starts the master process: initializes listeners and spawns accept loops.
+    #[instrument(skip(self), fields(
+        worker_processes = %self.cfg.global.worker_processes,
+        worker_connections = %self.cfg.global.worker_connections,
+        log_level = %self.cfg.global.log_level,
+    ))]
     pub async fn run(self) -> anyhow::Result<()> {
-        println!("========== MIGUX MASTER ==========");
-        println!("worker_processes   = {}", self.cfg.global.worker_processes);
-        println!(
-            "worker_connections = {}",
-            self.cfg.global.worker_connections
-        );
-        println!("log_level          = {}", self.cfg.global.log_level);
+        info!(target: "migux::master", "Starting MIGUX MASTER");
 
-        // 👇 límite de conexiones simultáneas en TODO el proceso (por ahora)
+        info!(
+            target: "migux::master",
+            worker_processes = self.cfg.global.worker_processes,
+            worker_connections = self.cfg.global.worker_connections,
+            log_level = %self.cfg.global.log_level,
+            "Global configuration loaded"
+        );
+
+        // Global limit for concurrent connections across the entire process
         let max_conns = self.cfg.global.worker_connections as usize;
         let semaphore = Arc::new(Semaphore::new(max_conns));
 
         let cfg = self.cfg.clone();
 
-        println!("\n[listen sockets (Tokio)]");
-        for (listen_addr, servers) in self.servers_by_listen.iter() {
-            // Crear listener de Tokio
-            let listener = TcpListener::bind(listen_addr).await?;
+        info!(
+            target: "migux::master",
+            max_conns,
+            "Global connection semaphore initialized"
+        );
 
-            println!(
-                "  - tokio listener en {listen_addr} ({} servers)",
-                servers.len()
+        // One accept-loop per listening socket
+        for (listen_addr, servers) in self.servers_by_listen.iter() {
+            info!(
+                target: "migux::master",
+                listen = %listen_addr,
+                num_servers = servers.len(),
+                "Creating Tokio listener"
             );
+
+            let listener = match TcpListener::bind(listen_addr).await {
+                Ok(l) => {
+                    info!(
+                        target: "migux::master",
+                        listen = %listen_addr,
+                        "Bind() successful"
+                    );
+                    l
+                }
+                Err(e) => {
+                    error!(
+                        target: "migux::master",
+                        listen = %listen_addr,
+                        error = ?e,
+                        "Failed to bind listener"
+                    );
+                    return Err(e.into());
+                }
+            };
 
             let addr = listen_addr.clone();
             let sem_clone = semaphore.clone();
@@ -69,27 +104,48 @@ impl Master {
             tokio::spawn(async move {
                 if let Err(e) = accept_loop(
                     listener,
-                    addr,
+                    addr.clone(),
                     sem_clone,
                     Arc::new(servers_for_listener),
                     cfg_clone,
                 )
                 .await
                 {
-                    eprintln!("[accept-loop] error: {e:?}");
+                    error!(
+                        target: "migux::master",
+                        listen = %addr,
+                        error = ?e,
+                        "accept_loop exited with an error"
+                    );
+                } else {
+                    warn!(
+                        target: "migux::master",
+                        listen = %addr,
+                        "accept_loop exited cleanly (possible shutdown)"
+                    );
                 }
             });
         }
 
-        println!("==================================");
+        info!(
+            target: "migux::master",
+            "Master initialized. Waiting for incoming connections (Ctrl+C to stop)..."
+        );
 
-        // Mantener el proceso vivo (por ahora) hasta que le hagas Ctrl+C
+        // Keep the master process alive
         loop {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     }
 }
 
+#[instrument(
+    skip(listener, semaphore, servers, cfg),
+    fields(
+        listen = %listen_addr,
+        max_permits = semaphore.available_permits(),
+    )
+)]
 async fn accept_loop(
     listener: TcpListener,
     listen_addr: String,
@@ -97,23 +153,94 @@ async fn accept_loop(
     servers: Arc<Vec<ServerRuntime>>,
     cfg: Arc<MiguxConfig>,
 ) -> anyhow::Result<()> {
-    loop {
-        let (stream, addr) = listener.accept().await?;
+    info!(
+        target: "migux::master",
+        listen = %listen_addr,
+        "accept_loop started for listening socket"
+    );
 
-        // 👇 Pedir un "permiso" del semáforo (si se agota, espera)
-        let permit = semaphore.clone().acquire_owned().await?;
-        println!("[master] new connection in {listen_addr} from {addr}");
+    loop {
+        // Clone once per iteration to avoid move issues
+        let listen_this = listen_addr.clone();
+
+        // Wait for a new incoming connection
+        let (stream, addr) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                error!(
+                    target: "migux::master",
+                    listen = %listen_this,
+                    error = ?e,
+                    "Failed to accept connection"
+                );
+                return Err(e.into());
+            }
+        };
+
+        // Acquire a permit (global connection limit)
+        let sem_for_permit = semaphore.clone();
+        let permit = match sem_for_permit.acquire_owned().await {
+            Ok(p) => p,
+            Err(e) => {
+                error!(
+                    target: "migux::master",
+                    listen = %listen_this,
+                    error = ?e,
+                    "Failed to acquire connection permit"
+                );
+                return Err(e.into());
+            }
+        };
+
+        let in_flight = semaphore.available_permits();
+
+        debug!(
+            target: "migux::master",
+            listen = %listen_this,
+            client_addr = %addr,
+            in_flight = in_flight,
+            "New connection accepted"
+        );
 
         let servers_clone = servers.clone();
         let cfg_clone = cfg.clone();
+        let listen_for_span = listen_this.clone();
 
-        // Aquí creamos el "worker lógico" por conexión
         tokio::spawn(async move {
-            // Cuando este future termine, el `permit` se suelta solo al salir del scope
+            let span = tracing::info_span!(
+                "worker_connection",
+                client_addr = %addr,
+                listen = %listen_for_span,
+            );
+            let _enter = span.enter();
+
+            debug!(
+                target: "migux::worker",
+                "Worker spawned for incoming connection"
+            );
+
             if let Err(e) = handle_connection(stream, addr, servers_clone, cfg_clone).await {
-                eprintln!("[worker] error handling {addr}: {e:?}");
+                error!(
+                    target: "migux::worker",
+                    client_addr = %addr,
+                    error = ?e,
+                    "Error while handling connection"
+                );
+            } else {
+                debug!(
+                    target: "migux::worker",
+                    client_addr = %addr,
+                    "Connection handled successfully"
+                );
             }
-            drop(permit); // explícito para que se entienda
+
+            drop(permit);
+
+            debug!(
+                target: "migux::master",
+                client_addr = %addr,
+                "Permit released after connection closed"
+            );
         });
     }
 }

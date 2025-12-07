@@ -10,3 +10,4 @@ migux_http = { path = "../migux_http" }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }

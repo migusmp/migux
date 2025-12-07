@@ -4,6 +4,7 @@ use migux_http::responses::send_404;
 use migux_proxy::serve_proxy;
 use migux_static::serve_static;
 use tokio::{io::AsyncReadExt, net::TcpStream};
+use tracing::{debug, info, instrument, warn};
 
 use migux_config::{LocationType, MiguxConfig};
 
@@ -13,58 +14,97 @@ mod routing;
 
 use routing::{match_location, parse_request_line, select_default_server};
 
-/// Punto de entrada del "worker lógico" por conexión.
+/// Entry point for a “logical worker” that handles a single connection.
+#[instrument(
+    skip(stream, servers, cfg),
+    fields(
+        client = %client_addr,
+    )
+)]
 pub async fn handle_connection(
     mut stream: TcpStream,
     client_addr: SocketAddr,
     servers: Arc<Vec<ServerRuntime>>,
     cfg: Arc<MiguxConfig>,
 ) -> anyhow::Result<()> {
-    // 1) Leemos la request completa (cabeceras + body)
+    info!(target: "migux::worker", "Handling new client connection");
+
+    // 1) Read the entire HTTP request (headers + optional body)
     let (req_headers, req_body) = read_http_request(&mut stream).await?;
 
     if req_headers.is_empty() {
-        // conexión vacía
+        debug!(target: "migux::worker", "Empty request received; closing connection");
         return Ok(());
     }
 
-    // 2) Parsear línea de request
+    // 2) Parse request line
     let (method, path) = parse_request_line(&req_headers);
+    debug!(
+        target: "migux::worker",
+        %method,
+        %path,
+        "Parsed HTTP request line"
+    );
 
-    println!("[worker] method = {}, path = {}", method, path);
-
-    // 3) Seleccionar server
+    // 3) Select server for this connection
     let server = select_default_server(&servers);
-    println!(
-        "[worker] using server '{}' (root = {}, index = {})",
-        server.name, server.config.root, server.config.index
+    debug!(
+        target: "migux::worker",
+        server = %server.name,
+        root = %server.config.root,
+        index = %server.config.index,
+        "Selected server for request"
     );
 
     if server.locations.is_empty() {
+        warn!(
+            target: "migux::worker",
+            server = %server.name,
+            "Server has no locations; returning 404"
+        );
         send_404(&mut stream).await?;
         return Ok(());
     }
 
-    // 4) Seleccionar location
+    // 4) Match location
     let location = match_location(&server.locations, path);
-    println!(
-        "[worker] matched location: server={}, path={}, type={:?}",
-        location.server, location.path, location.r#type
+    debug!(
+        target: "migux::worker",
+        location_server = %location.server,
+        location_path = %location.path,
+        location_type = ?location.r#type,
+        "Matched location"
     );
 
-    // 5) Despachar según tipo de location
+    // 5) Dispatch according to location type
     match location.r#type {
         LocationType::Static => {
-            // Para estáticos, solo permitimos GET y HEAD
             if method != "GET" && method != "HEAD" {
+                warn!(
+                    target: "migux::worker",
+                    %method,
+                    "Unsupported method for static file; returning 404"
+                );
                 send_404(&mut stream).await?;
                 return Ok(());
             }
 
+            debug!(
+                target: "migux::static",
+                %path,
+                "Serving static file"
+            );
+
             serve_static(&mut stream, &server.config, location, path).await?;
         }
+
         LocationType::Proxy => {
-            // Proxy: aceptamos cualquier método y reenviamos headers + body
+            debug!(
+                target: "migux::proxy",
+                %path,
+                "Forwarding request to upstream proxy"
+            );
+
             serve_proxy(
                 &mut stream,
                 location,
@@ -78,30 +118,41 @@ pub async fn handle_connection(
         }
     }
 
+    info!(
+        target: "migux::worker",
+        %client_addr,
+        "Finished handling connection"
+    );
+
     Ok(())
 }
 
-/// Lee una petición HTTP completa:
-/// - lee hasta encontrar `\r\n\r\n` (fin de cabeceras)
-/// - busca `Content-Length`
-/// - si existe, lee el body completo
-/// - devuelve (cabeceras como String, body como Vec<u8>)
+/// Reads a full HTTP request:
+/// - Reads until `\r\n\r\n` (end of headers)
+/// - Extracts Content-Length if present
+/// - Reads the full body if required
+/// - Returns (headers as String, body as Vec<u8>)
+#[instrument(skip(stream), fields())]
 async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
-
     let headers_end;
 
-    // 1) Leer hasta encontrar "\r\n\r\n"
+    // 1) Read until header terminator
     loop {
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
-            // conexión cerrada sin nada
             if buf.is_empty() {
+                debug!(
+                    target: "migux::http",
+                    "Connection closed before request was received"
+                );
                 return Ok((String::new(), Vec::new()));
             } else {
-                // no hemos encontrado fin de cabeceras, pero hay datos;
-                // tratamos todo como cabeceras "raras" sin body
+                warn!(
+                    target: "migux::http",
+                    "Connection closed but headers were incomplete"
+                );
                 headers_end = buf.len();
                 break;
             }
@@ -114,34 +165,55 @@ async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, Ve
             break;
         }
 
-        // si quieres, aquí podrías limitar tamaño de cabeceras para evitar abusos
+        // Optional: enforce max header size for safety
     }
 
     let header_bytes = &buf[..headers_end];
     let headers_str = String::from_utf8_lossy(header_bytes).to_string();
 
-    // 2) Buscar Content-Length
+    debug!(
+        target: "migux::http",
+        header_len = headers_str.len(),
+        "Parsed HTTP headers"
+    );
+
+    // 2) Parse Content-Length
     let mut content_length = 0usize;
     for line in headers_str.lines() {
-        let line_lower = line.to_ascii_lowercase();
-        if let Some(rest) = line_lower.strip_prefix("content-length:") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
             if let Ok(len) = rest.trim().parse::<usize>() {
                 content_length = len;
             }
         }
     }
 
-    // 3) Calcular cuánto body ya hemos leído
+    if content_length > 0 {
+        debug!(
+            target: "migux::http",
+            content_length,
+            "Detected Content-Length header"
+        );
+    }
+
+    // 3) Extract any portion of body already read
     let already_read_body = buf.len().saturating_sub(headers_end + 4);
     let mut body = Vec::new();
+
     if already_read_body > 0 && headers_end + 4 <= buf.len() {
         body.extend_from_slice(&buf[headers_end + 4..]);
     }
 
-    // 4) Leer el resto del body si falta
+    // 4) Read remaining body if needed
     while body.len() < content_length {
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
+            warn!(
+                target: "migux::http",
+                expected = content_length,
+                got = body.len(),
+                "Client closed connection before body was fully received"
+            );
             break;
         }
         body.extend_from_slice(&tmp[..n]);
