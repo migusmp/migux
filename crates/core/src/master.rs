@@ -110,7 +110,7 @@ async fn accept_loop(
         // Aquí creamos el "worker lógico" por conexión
         tokio::spawn(async move {
             // Cuando este future termine, el `permit` se suelta solo al salir del scope
-            if let Err(e) = handle_connection(stream, servers_clone, cfg_clone).await {
+            if let Err(e) = handle_connection(stream, addr, servers_clone, cfg_clone).await {
                 eprintln!("[worker] error handling {addr}: {e:?}");
             }
             drop(permit); // explícito para que se entienda

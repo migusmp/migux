@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use migux_http::responses::send_404;
 use migux_proxy::serve_proxy;
@@ -17,6 +17,7 @@ use static_files::serve_static;
 /// Punto de entrada del "worker lógico" por conexión.
 pub async fn handle_connection(
     mut stream: TcpStream,
+    client_addr: SocketAddr,
     servers: Arc<Vec<ServerRuntime>>,
     cfg: Arc<MiguxConfig>,
 ) -> anyhow::Result<()> {
@@ -65,7 +66,16 @@ pub async fn handle_connection(
         }
         LocationType::Proxy => {
             // Proxy: aceptamos cualquier método y reenviamos headers + body
-            serve_proxy(&mut stream, location, path, &req_headers, &req_body, &cfg).await?;
+            serve_proxy(
+                &mut stream,
+                location,
+                path,
+                &req_headers,
+                &req_body,
+                &cfg,
+                &client_addr,
+            )
+            .await?;
         }
     }
 

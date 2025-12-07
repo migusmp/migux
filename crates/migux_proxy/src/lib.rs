@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, OnceLock,
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
 };
 
 use dashmap::DashMap;
@@ -124,6 +127,72 @@ fn choose_upstream_addrs_rr_order(
     Ok(ordered)
 }
 
+/// Reescribe los headers para proxy:
+/// - elimina X-Forwarded-* previos
+/// - conserva Host original
+/// - añade:
+///   * X-Forwarded-For
+///   * X-Real-IP
+///   * X-Forwarded-Proto
+///   * X-Forwarded-Host
+fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
+    // Saltamos la primera línea (request line)
+    let mut lines = req_headers.lines();
+    let _ = lines.next();
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut host_value: Option<String> = None;
+
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Esperamos formato "Nombre: valor"
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim().to_string();
+            let value = value.trim().to_string();
+
+            // Guardamos el Host original
+            if name.eq_ignore_ascii_case("host") {
+                host_value = Some(value.clone());
+            }
+
+            // Ignoramos X-Forwarded-* existentes: los regeneramos nosotros
+            if name.eq_ignore_ascii_case("x-forwarded-for")
+                || name.eq_ignore_ascii_case("x-real-ip")
+                || name.eq_ignore_ascii_case("x-forwarded-proto")
+                || name.eq_ignore_ascii_case("x-forwarded-host")
+            {
+                continue;
+            }
+
+            headers.push((name, value));
+        }
+    }
+
+    // Añadimos nuestros X-Forwarded-*
+    headers.push(("X-Forwarded-For".to_string(), client_ip.to_string()));
+    headers.push(("X-Real-IP".to_string(), client_ip.to_string()));
+    headers.push(("X-Forwarded-Proto".to_string(), "http".to_string()));
+
+    if let Some(h) = host_value {
+        headers.push(("X-Forwarded-Host".to_string(), h));
+    }
+
+    // Reconstruimos en formato "Header: valor\r\n"
+    let mut out = String::new();
+    for (name, value) in headers {
+        out.push_str(&name);
+        out.push_str(": ");
+        out.push_str(&value);
+        out.push_str("\r\n");
+    }
+
+    out
+}
+
 /// Lógica de proxy:
 /// - resuelve upstream y estrategia (round_robin o single)
 /// - aplica strip_prefix sobre el path
@@ -138,6 +207,7 @@ pub async fn serve_proxy(
     req_headers: &str,
     req_body: &[u8],
     cfg: &Arc<MiguxConfig>,
+    client_addr: &SocketAddr,
 ) -> anyhow::Result<()> {
     // 0) Resolver upstream desde config
     let upstream_name = location
@@ -152,6 +222,9 @@ pub async fn serve_proxy(
 
     // Lista de candidatos en orden de preferencia (round-robin + fallback)
     let candidate_addrs = choose_upstream_addrs_rr_order(upstream_name, upstream_cfg)?;
+
+    // 👇 IP real del cliente
+    let client_ip = client_addr.ip().to_string();
 
     // 1) strip_prefix: quitamos location.path del path de la request
     let upstream_path = strip_prefix_path(req_path, &location.path);
@@ -173,7 +246,7 @@ pub async fn serve_proxy(
     let _old_path = parts.next().unwrap_or("/");
     let http_version = parts.next().unwrap_or("HTTP/1.1");
 
-    let rest_of_headers: String = lines.map(|l| format!("{l}\r\n")).collect();
+    let rest_of_headers = rewrite_proxy_headers(req_headers, &client_ip);
 
     // Reconstruimos request para upstream
     let mut out = Vec::new();
