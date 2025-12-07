@@ -55,6 +55,10 @@ pub async fn send_500(stream: &mut TcpStream) -> anyhow::Result<()> {
     .await
 }
 
+pub async fn send_405(stream: &mut TcpStream) -> anyhow::Result<()> {
+    send_text_response(stream, "405 Method Not Allowed", "405 Method Not Allowed\n").await
+}
+
 /// (DEPRECATED) servir index usando la misma lógica genérica.
 pub async fn serve_index(stream: &mut TcpStream, server: &ServerRuntime) -> anyhow::Result<()> {
     let file_path = format!("{}/{}", server.config.root, server.config.index);

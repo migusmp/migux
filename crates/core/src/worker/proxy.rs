@@ -47,11 +47,11 @@ pub async fn serve_proxy(
     _server: &ServerRuntime,
     location: &LocationConfig,
     req_path: &str,
-    req_raw: &str,
+    req_headers: &str,
+    req_body: &[u8],
     cfg: &Arc<MiguxConfig>,
 ) -> anyhow::Result<()> {
-    // 1) strip_prefix: quitamos location.path del path de la request
-    let upstream_path = strip_prefix_path(req_path, &location.path);
+    // 0) Resolver upstream desde config
     let upstream_name = location
         .upstream
         .as_ref()
@@ -62,10 +62,13 @@ pub async fn serve_proxy(
         .get(upstream_name)
         .ok_or_else(|| anyhow::anyhow!("Upstream '{}' no encontrado", upstream_name))?;
 
-    let upstream_addr = &upstream_cfg.server; // ej: "127.0.0.1:3000"
+    let upstream_addr = &upstream_cfg.server;
+
+    // 1) strip_prefix: quitamos location.path del path de la request
+    let upstream_path = strip_prefix_path(req_path, &location.path);
 
     // 2) Reescribir primera línea: "METHOD /algo HTTP/1.1"
-    let mut lines = req_raw.lines();
+    let mut lines = req_headers.lines();
 
     let first_line = match lines.next() {
         Some(l) => l,
@@ -81,23 +84,27 @@ pub async fn serve_proxy(
     let _old_path = parts.next().unwrap_or("/");
     let http_version = parts.next().unwrap_or("HTTP/1.1");
 
-    let rest_of_request: String = lines.map(|l| format!("{l}\r\n")).collect();
+    // el resto de cabeceras tal cual
+    let rest_of_headers: String = lines.map(|l| format!("{l}\r\n")).collect();
 
-    let new_request = format!("{method} {upstream_path} {http_version}\r\n{rest_of_request}\r\n");
+    // Reconstruimos cabeceras con ruta ya reescrita
+    let mut out = Vec::new();
+    let start_line = format!("{method} {upstream_path} {http_version}\r\n");
+    out.extend_from_slice(start_line.as_bytes());
+    out.extend_from_slice(rest_of_headers.as_bytes());
+    out.extend_from_slice(b"\r\n"); // fin de cabeceras
+    out.extend_from_slice(req_body); // añadimos el body tal cual
 
     println!(
-        "[proxy] {} {} → upstream path: {}",
-        method, req_path, upstream_path
+        "[proxy] {} {} → upstream '{}' ({}) path: {}",
+        method, req_path, upstream_name, upstream_addr, upstream_path
     );
 
-    println!("[proxy] upstream '{}' → {}", upstream_name, upstream_addr);
-
-    // 3) Conectar a upstream (por ahora hardcodeado)
+    // 3) Conectar a upstream
     let mut upstream_stream = TcpStream::connect(upstream_addr).await?;
-    // Más adelante: usar _cfg para coger upstream.app de la config
 
-    // 4) Enviar request reescrita al upstream
-    upstream_stream.write_all(new_request.as_bytes()).await?;
+    // 4) Enviar request reescrita + body
+    upstream_stream.write_all(&out).await?;
 
     // 5) Leer respuesta del upstream y hacérsela "túnel" al cliente
     let mut buf = [0u8; 4096];
