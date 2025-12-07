@@ -18,36 +18,15 @@ use migux_config::{LocationConfig, MiguxConfig, UpstreamConfig, UpstreamServers}
 /// Mapa global: nombre de upstream -> contador para round robin
 static UPSTREAM_COUNTERS: OnceLock<DashMap<String, AtomicUsize>> = OnceLock::new();
 
+/// Pool global de conexiones persistentes por upstream ("host:port")
+static UPSTREAM_POOLS: OnceLock<DashMap<String, Vec<TcpStream>>> = OnceLock::new();
+
 fn upstream_counters() -> &'static DashMap<String, AtomicUsize> {
     UPSTREAM_COUNTERS.get_or_init(|| DashMap::new())
 }
 
-/// Parsea posibles formatos de server:
-/// - "127.0.0.1:3000"
-/// - "[\"127.0.0.1:3000\", \"127.0.0.1:3001\"]"
-fn parse_servers_from_one(raw: &str) -> Vec<String> {
-    let trimmed = raw.trim();
-
-    // Formato tipo ["127.0.0.1:3000", "127.0.0.1:3001"]
-    if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        let inner = &trimmed[1..trimmed.len() - 1]; // sin [ ]
-        inner
-            .split(',')
-            .filter_map(|part| {
-                let part = part.trim();
-                // quitar comillas si las hay
-                let part = part.trim_matches('"');
-                if part.is_empty() {
-                    None
-                } else {
-                    Some(part.to_string())
-                }
-            })
-            .collect()
-    } else {
-        // formato simple "127.0.0.1:3000"
-        vec![trimmed.to_string()]
-    }
+fn upstream_pools() -> &'static DashMap<String, Vec<TcpStream>> {
+    UPSTREAM_POOLS.get_or_init(|| DashMap::new())
 }
 
 /// Aplica strip_prefix estilo nginx:
@@ -76,11 +55,34 @@ pub fn strip_prefix_path(req_path: &str, location_path: &str) -> String {
     tail
 }
 
-/// Normaliza UpstreamConfig a un Vec<String> de "host:port"
+/// Parsea posibles formatos de server:
+/// - "127.0.0.1:3000"
+/// - "[\"127.0.0.1:3000\", \"127.0.0.1:3001\"]"
+fn parse_servers_from_one(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let inner = &trimmed[1..trimmed.len() - 1]; // sin [ ]
+        inner
+            .split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                let part = part.trim_matches('"');
+                if part.is_empty() {
+                    None
+                } else {
+                    Some(part.to_string())
+                }
+            })
+            .collect()
+    } else {
+        vec![trimmed.to_string()]
+    }
+}
+
 /// Normaliza UpstreamConfig a un Vec<String> de "host:port"
 fn normalize_servers(cfg: &UpstreamConfig) -> anyhow::Result<Vec<String>> {
     let servers: Vec<String> = match &cfg.server {
-        // Ojo: tu parser mete el array entero como String aquí
         UpstreamServers::One(s) => parse_servers_from_one(s),
         UpstreamServers::Many(list) => list.clone(),
     };
@@ -149,17 +151,14 @@ fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
             continue;
         }
 
-        // Esperamos formato "Nombre: valor"
         if let Some((name, value)) = line.split_once(':') {
             let name = name.trim().to_string();
             let value = value.trim().to_string();
 
-            // Guardamos el Host original
             if name.eq_ignore_ascii_case("host") {
                 host_value = Some(value.clone());
             }
 
-            // Ignoramos X-Forwarded-* existentes: los regeneramos nosotros
             if name.eq_ignore_ascii_case("x-forwarded-for")
                 || name.eq_ignore_ascii_case("x-real-ip")
                 || name.eq_ignore_ascii_case("x-forwarded-proto")
@@ -172,7 +171,6 @@ fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
         }
     }
 
-    // Añadimos nuestros X-Forwarded-*
     headers.push(("X-Forwarded-For".to_string(), client_ip.to_string()));
     headers.push(("X-Real-IP".to_string(), client_ip.to_string()));
     headers.push(("X-Forwarded-Proto".to_string(), "http".to_string()));
@@ -181,7 +179,6 @@ fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
         headers.push(("X-Forwarded-Host".to_string(), h));
     }
 
-    // Reconstruimos en formato "Header: valor\r\n"
     let mut out = String::new();
     for (name, value) in headers {
         out.push_str(&name);
@@ -193,12 +190,142 @@ fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
     out
 }
 
+/// Saca una conexión de upstream del pool o crea una nueva
+async fn checkout_upstream_stream(addr: &str) -> anyhow::Result<TcpStream> {
+    let pools = upstream_pools();
+
+    if let Some(mut entry) = pools.get_mut(addr) {
+        if let Some(stream) = entry.pop() {
+            println!("[proxy] reusing upstream connection to {}", addr);
+            return Ok(stream);
+        }
+    }
+
+    println!("[proxy] creating new upstream connection to {}", addr);
+    let stream = TcpStream::connect(addr).await?;
+    Ok(stream)
+}
+
+/// Devuelve una conexión sana al pool para poder reutilizarla
+fn checkin_upstream_stream(addr: &str, stream: TcpStream) {
+    let pools = upstream_pools();
+    pools
+        .entry(addr.to_string())
+        .or_insert_with(Vec::new)
+        .push(stream);
+}
+
+/// Lee una respuesta HTTP del upstream y decide si se puede reutilizar la conexión.
+/// - Lee cabeceras hasta "\r\n\r\n"
+/// - Busca Content-Length y Connection
+/// - Si hay Content-Length: lee exactamente ese número de bytes y deja la conexión viva (si no es "Connection: close").
+/// - Si NO hay Content-Length: lee hasta EOF y NO reutiliza la conexión.
+async fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, bool)> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let mut headers_end: Option<usize> = None;
+
+    // Leer hasta encontrar fin de cabeceras
+    loop {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            if buf.is_empty() {
+                anyhow::bail!("upstream cerró la conexión sin enviar respuesta");
+            } else {
+                anyhow::bail!("upstream cerró la conexión mientras se leían cabeceras");
+            }
+        }
+        buf.extend_from_slice(&tmp[..n]);
+
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            headers_end = Some(pos);
+            break;
+        }
+
+        if buf.len() > 64 * 1024 {
+            anyhow::bail!("cabeceras de respuesta demasiado grandes");
+        }
+    }
+
+    let headers_end = headers_end.unwrap();
+    let header_bytes = &buf[..headers_end];
+    let header_str = String::from_utf8_lossy(header_bytes);
+
+    let mut content_length: Option<usize> = None;
+    let mut connection_close = false;
+
+    let mut lines = header_str.lines();
+
+    if let Some(status_line) = lines.next() {
+        println!("[proxy] upstream status: {}", status_line);
+    }
+
+    for line in lines {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            if let Ok(len) = rest.trim().parse::<usize>() {
+                content_length = Some(len);
+            }
+        }
+        if let Some(rest) = lower.strip_prefix("connection:") {
+            if rest.trim() == "close" {
+                connection_close = true;
+            }
+        }
+    }
+
+    let mut response_bytes = Vec::new();
+    // Cabeceras + separador
+    response_bytes.extend_from_slice(&buf[..headers_end + 4]);
+
+    let already_body = buf.len().saturating_sub(headers_end + 4);
+
+    if let Some(cl) = content_length {
+        let mut body = Vec::with_capacity(cl);
+
+        if already_body > 0 {
+            let initial = &buf[headers_end + 4..];
+            let to_take = initial.len().min(cl);
+            body.extend_from_slice(&initial[..to_take]);
+        }
+
+        while body.len() < cl {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                break;
+            }
+            let remaining = cl - body.len();
+            let take = remaining.min(n);
+            body.extend_from_slice(&tmp[..take]);
+        }
+
+        response_bytes.extend_from_slice(&body);
+
+        let reusable = !connection_close;
+        Ok((response_bytes, reusable))
+    } else {
+        // No hay Content-Length -> leer hasta EOF y no reutilizar
+        if already_body > 0 {
+            response_bytes.extend_from_slice(&buf[headers_end + 4..]);
+        }
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                break;
+            }
+            response_bytes.extend_from_slice(&tmp[..n]);
+        }
+        Ok((response_bytes, false))
+    }
+}
+
 /// Lógica de proxy:
 /// - resuelve upstream y estrategia (round_robin o single)
 /// - aplica strip_prefix sobre el path
 /// - reescribe la primera línea del request (METHOD PATH HTTP/x.y)
-/// - reenvía headers + body tal cual al upstream
-/// - intenta varios upstreams en orden (fallback) si alguno no conecta
+/// - reescribe headers e inyecta X-Forwarded-*
+/// - intenta varios upstreams en orden (fallback)
+/// - reutiliza conexiones persistentes (keep-alive) cuando es posible
 /// - hace de "túnel" de la respuesta de upstream al cliente
 pub async fn serve_proxy(
     client_stream: &mut TcpStream,
@@ -223,13 +350,13 @@ pub async fn serve_proxy(
     // Lista de candidatos en orden de preferencia (round-robin + fallback)
     let candidate_addrs = choose_upstream_addrs_rr_order(upstream_name, upstream_cfg)?;
 
-    // 👇 IP real del cliente
+    // IP real del cliente
     let client_ip = client_addr.ip().to_string();
 
     // 1) strip_prefix: quitamos location.path del path de la request
     let upstream_path = strip_prefix_path(req_path, &location.path);
 
-    // 2) Reescribir primera línea: "METHOD /algo HTTP/1.1"
+    // 2) Parsear primera línea de la request original
     let mut lines = req_headers.lines();
 
     let first_line = match lines.next() {
@@ -246,6 +373,7 @@ pub async fn serve_proxy(
     let _old_path = parts.next().unwrap_or("/");
     let http_version = parts.next().unwrap_or("HTTP/1.1");
 
+    // 3) Reescribir headers con X-Forwarded-*
     let rest_of_headers = rewrite_proxy_headers(req_headers, &client_ip);
 
     // Reconstruimos request para upstream
@@ -256,43 +384,69 @@ pub async fn serve_proxy(
     out.extend_from_slice(b"\r\n"); // fin cabeceras
     out.extend_from_slice(req_body); // body tal cual
 
-    // 3) Intentar conectar a los upstreams en orden (fallback)
     let mut last_err: Option<anyhow::Error> = None;
 
+    // 4) Intentar conectar a los upstreams en orden (fallback + keep-alive)
     for upstream_addr in &candidate_addrs {
+        let mut upstream_stream = match checkout_upstream_stream(upstream_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[proxy] error obteniendo conexión a upstream {}: {:?}",
+                    upstream_addr, e
+                );
+                last_err = Some(e);
+                continue;
+            }
+        };
+
         println!(
             "[proxy] {} {} → upstream '{}' ({}) path: {}",
             method, req_path, upstream_name, upstream_addr, upstream_path
         );
 
-        match TcpStream::connect(upstream_addr).await {
-            Ok(mut upstream_stream) => {
-                // 4) Enviar request al upstream
-                upstream_stream.write_all(&out).await?;
+        if let Err(e) = upstream_stream.write_all(&out).await {
+            eprintln!(
+                "[proxy] error escribiendo a upstream {}: {:?}",
+                upstream_addr, e
+            );
+            last_err = Some(e.into());
+            // No devolvemos esta conexión al pool
+            continue;
+        }
 
-                // 5) Túnel de respuesta
-                let mut buf = [0u8; 4096];
-
-                loop {
-                    let n = upstream_stream.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    client_stream.write_all(&buf[..n]).await?;
-                }
-
-                client_stream.flush().await?;
-                return Ok(()); // ✅ ÉXITO con este upstream
-            }
+        // Leer respuesta del upstream (1 respuesta HTTP) y decidir si se reusa la conexión
+        let (resp_bytes, reusable) = match read_http_response(&mut upstream_stream).await {
+            Ok(r) => r,
             Err(e) => {
                 eprintln!(
-                    "[proxy] error conectando a upstream {}: {:?}",
+                    "[proxy] error leyendo respuesta de upstream {}: {:?}",
                     upstream_addr, e
                 );
-                last_err = Some(e.into());
-                // seguimos con el siguiente upstream
+                last_err = Some(e);
+                continue;
             }
+        };
+
+        if let Err(e) = client_stream.write_all(&resp_bytes).await {
+            eprintln!("[proxy] error escribiendo al cliente: {:?}", e);
+            last_err = Some(e.into());
+            // aunque falle el cliente, la conexión a upstream podría seguir sana,
+            // pero para simplificar no la devolvemos al pool si la escritura falla.
+            continue;
         }
+
+        if let Err(e) = client_stream.flush().await {
+            eprintln!("[proxy] error haciendo flush al cliente: {:?}", e);
+            // aun así, consideramos la conexión a upstream usable o no según 'reusable'
+        }
+
+        // ✅ ÉXITO: si el upstream quiere keep-alive, devolvemos la conexión al pool
+        if reusable {
+            checkin_upstream_stream(upstream_addr, upstream_stream);
+        }
+
+        return Ok(());
     }
 
     // Si ninguno ha funcionado → 502 Bad Gateway
