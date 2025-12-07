@@ -1,4 +1,5 @@
 use std::{sync::Arc, time::Duration};
+use tokio::fs;
 
 use dashmap::{self, DashMap};
 use migux_config::MiguxConfig;
@@ -8,7 +9,7 @@ use tokio::{
     sync::Semaphore,
 };
 
-use crate::{build_servers_by_listen, ServersByListen};
+use crate::{build_servers_by_listen, ServerRuntime, ServersByListen};
 
 pub struct CacheStore {
     pub responses: DashMap<String, Vec<u8>>,
@@ -65,9 +66,12 @@ impl Master {
 
             let addr = listen_addr.clone();
             let sem_clone = semaphore.clone();
+            let servers_for_listener = servers.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = accept_loop(listener, addr, sem_clone).await {
+                if let Err(e) =
+                    accept_loop(listener, addr, sem_clone, Arc::new(servers_for_listener)).await
+                {
                     eprintln!("[accept-loop] error: {e:?}");
                 }
             });
@@ -86,6 +90,7 @@ async fn accept_loop(
     listener: TcpListener,
     listen_addr: String,
     semaphore: Arc<Semaphore>,
+    servers: Arc<Vec<ServerRuntime>>,
 ) -> anyhow::Result<()> {
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -94,10 +99,12 @@ async fn accept_loop(
         let permit = semaphore.clone().acquire_owned().await?;
         println!("[master] new connection in {listen_addr} from {addr}");
 
+        let servers_clone = servers.clone();
+
         // Aquí creamos el "worker lógico" por conexión
         tokio::spawn(async move {
             // Cuando este future termine, el `permit` se suelta solo al salir del scope
-            if let Err(e) = handle_connection(stream).await {
+            if let Err(e) = handle_connection(stream, servers_clone).await {
                 eprintln!("[worker] error handling {addr}: {e:?}");
             }
             drop(permit); // explícito para que se entienda
@@ -105,36 +112,99 @@ async fn accept_loop(
     }
 }
 
-async fn handle_connection(mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
-    // 1. Leer algunos bytes de la request
+async fn handle_connection(
+    mut stream: tokio::net::TcpStream,
+    servers: Arc<Vec<ServerRuntime>>,
+) -> anyhow::Result<()> {
     let mut buf = [0u8; 1024];
     let n = stream.read(&mut buf).await?;
 
     if n == 0 {
-        // El cliente se ha ido
         return Ok(());
     }
 
     let req_str = String::from_utf8_lossy(&buf[..n]);
 
-    // 2. Sacar la primera línea: "GET / HTTP/1.1"
+    let mut method = "-";
+    let mut path = "/";
+
     if let Some(first_line) = req_str.lines().next() {
         println!("[worker] request line: {}", first_line);
-
-        // Intentamos separar método y path
         let mut parts = first_line.split_whitespace();
-        let method = parts.next().unwrap_or("-");
-        let path = parts.next().unwrap_or("-");
+        method = parts.next().unwrap_or("-");
+        path = parts.next().unwrap_or("/");
         println!("[worker] method = {}, path = {}", method, path);
-    } else {
-        println!("[worker] request sin primera línea?");
     }
 
-    // 3. Responder algo sencillo (HTTP 200)
-    let body = b"Hello from Migux!\n";
+    let server = select_default_server(&servers);
+    println!(
+        "[worker] using server '{}' (root = {}, index = {})",
+        server.name, server.config.root, server.config.index
+    );
 
+    // 👉 De momento: GET + "/" → servir index.html
+    if method == "GET" && path == "/" {
+        serve_index(&mut stream, server).await?;
+    } else {
+        // cualquier otra ruta → 404 simple
+        send_404(&mut stream).await?;
+    }
+
+    Ok(())
+}
+
+fn select_default_server<'a>(servers: &'a [ServerRuntime]) -> &'a ServerRuntime {
+    // De momento, simplemente el primero
+    &servers[0]
+}
+
+async fn serve_index(
+    stream: &mut tokio::net::TcpStream,
+    server: &ServerRuntime,
+) -> anyhow::Result<()> {
+    let file_path = format!("{}/{}", server.config.root, server.config.index);
+    println!("[worker] serving file: {}", file_path);
+
+    match fs::read(&file_path).await {
+        Ok(body) => {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n",
+                body.len()
+            );
+
+            stream.write_all(response.as_bytes()).await?;
+            stream.write_all(&body).await?;
+            stream.flush().await?;
+        }
+        Err(e) => {
+            eprintln!("[worker] error reading {}: {:?}", file_path, e);
+            // si falla el archivo, devolvemos 500
+            let body = b"Internal Server Error\n";
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.write_all(body).await?;
+            stream.flush().await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn send_404(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
+    let body = b"404 Not Found\n";
     let response = format!(
-        "HTTP/1.1 200 OK\r\n\
+        "HTTP/1.1 404 Not Found\r\n\
          Content-Type: text/plain; charset=utf-8\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
