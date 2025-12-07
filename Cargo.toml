@@ -17,7 +17,7 @@ members = [
     # WORKSPACE CRATES (SERVER LOGIC)
     # -----------------------------------------
 
-    "crates/core",           # CORE:
+    "crates/migux_core",           # CORE:
                              # Base types, global errors, constants,
                              # internal server model and abstractions.
 

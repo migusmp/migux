@@ -1,5 +1,5 @@
 [package]
-name = "core"
+name = "migux_core"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,6 +7,7 @@ edition = "2024"
 migux_config = { path="../migux_config" }
 migux_http = { path="../migux_http" }
 migux_proxy = { path="../migux_proxy" }
+migux_static = { path="../migux_static" }
 
 dashmap = { workspace = true }
 anyhow = { workspace = true }

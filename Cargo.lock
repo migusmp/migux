@@ -143,18 +143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dashmap",
- "migux_config",
- "migux_http",
- "migux_proxy",
- "tokio",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -455,10 +443,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
- "core",
  "http",
  "hyper",
  "migux_config",
+ "migux_core",
  "migux_http",
  "migux_proxy",
  "migux_router",
@@ -478,6 +466,19 @@ version = "0.1.0"
 dependencies = [
  "config",
  "serde",
+]
+
+[[package]]
+name = "migux_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dashmap",
+ "migux_config",
+ "migux_http",
+ "migux_proxy",
+ "migux_static",
+ "tokio",
 ]
 
 [[package]]
@@ -512,7 +513,10 @@ dependencies = [
 name = "migux_static"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "migux_config",
  "migux_http",
+ "migux_proxy",
  "mime_guess",
  "tokio",
 ]

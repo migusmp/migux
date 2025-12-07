@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-core = { path = "../crates/core" }
+migux_core = { path = "../crates/migux_core" }
 migux_config = { path = "../crates/migux_config" }
 migux_http = { path = "../crates/migux_http" }
 parser = { path = "../crates/parser" }

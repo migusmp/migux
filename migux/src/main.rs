@@ -1,6 +1,5 @@
-use core::master::Master;
-
 use migux_config::MiguxConfig;
+use migux_core::master::Master;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

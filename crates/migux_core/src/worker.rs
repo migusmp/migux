@@ -2,6 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use migux_http::responses::send_404;
 use migux_proxy::serve_proxy;
+use migux_static::serve_static;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 
 use migux_config::{LocationType, MiguxConfig};
@@ -9,10 +10,8 @@ use migux_config::{LocationType, MiguxConfig};
 use crate::ServerRuntime;
 
 mod routing;
-mod static_files;
 
 use routing::{match_location, parse_request_line, select_default_server};
-use static_files::serve_static;
 
 /// Punto de entrada del "worker lógico" por conexión.
 pub async fn handle_connection(
@@ -62,7 +61,7 @@ pub async fn handle_connection(
                 return Ok(());
             }
 
-            serve_static(&mut stream, server, location, path).await?;
+            serve_static(&mut stream, &server.config, location, path).await?;
         }
         LocationType::Proxy => {
             // Proxy: aceptamos cualquier método y reenviamos headers + body
