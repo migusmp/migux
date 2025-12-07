@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use migux_config::{LocationConfig, LocationType, MiguxConfig, ServerConfig};
 
 pub mod master;
+pub mod worker;
 
 pub type ListenAddr = String;
 
