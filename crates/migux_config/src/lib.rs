@@ -48,18 +48,34 @@ impl Default for HttpConfig {
 // =======================================================
 // UPSTREAM CONFIG + DEFAULTS
 // =======================================================
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum UpstreamServers {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UpstreamConfig {
-    pub server: String,
-    pub strategy: String,
+    pub server: UpstreamServers,
+    pub strategy: Option<String>,
 }
 
 impl Default for UpstreamConfig {
     fn default() -> Self {
         Self {
-            server: "".into(),
-            strategy: "round_robin".into(),
+            server: UpstreamServers::One(String::new()),
+            strategy: Some("round_robin".to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for UpstreamServers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpstreamServers::One(s) => write!(f, "{s}"),
+            UpstreamServers::Many(list) => write!(f, "{:?}", list),
         }
     }
 }
@@ -290,7 +306,6 @@ impl MiguxConfig {
         for (name, up) in &self.upstream {
             println!("  upstream {}:", name);
             println!("    server   = {}", up.server);
-            println!("    strategy = {}", up.strategy);
         }
 
         println!("\n[server]");
