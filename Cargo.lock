@@ -149,6 +149,8 @@ dependencies = [
  "anyhow",
  "dashmap",
  "migux_config",
+ "migux_http",
+ "migux_proxy",
  "tokio",
 ]
 
@@ -458,10 +460,10 @@ dependencies = [
  "hyper",
  "migux_config",
  "migux_http",
+ "migux_proxy",
  "migux_router",
  "migux_static",
  "parser",
- "proxy",
  "serde",
  "serde_json",
  "tokio",
@@ -482,7 +484,19 @@ dependencies = [
 name = "migux_http"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "httparse",
+ "tokio",
+]
+
+[[package]]
+name = "migux_proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dashmap",
+ "migux_config",
+ "migux_http",
  "tokio",
 ]
 
@@ -667,10 +681,6 @@ checksum = "5ee95bc4ef87b8d5ba32e8b7714ccc834865276eab0aed5c9958d00ec45f49e8"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "proxy"
-version = "0.1.0"
 
 [[package]]
 name = "quote"

@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 migux_config = { path="../migux_config" }
+migux_http = { path="../migux_http" }
+migux_proxy = { path="../migux_proxy" }
+
 dashmap = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }

@@ -10,7 +10,7 @@ migux_http = { path = "../crates/migux_http" }
 parser = { path = "../crates/parser" }
 migux_router = { path = "../crates/migux_router" }
 migux_static = { path = "../crates/migux_static" }
-proxy = { path = "../crates/proxy" }
+migux_proxy = { path = "../crates/migux_proxy" }
 utils = { path = "../crates/utils" }
 
 # Hereda del workspace

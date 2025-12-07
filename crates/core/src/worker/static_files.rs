@@ -1,10 +1,9 @@
+use migux_http::responses::{send_404, send_500, send_response};
 use tokio::{fs, net::TcpStream};
 
 use migux_config::LocationConfig;
 
 use crate::ServerRuntime;
-
-use super::responses::{send_404, send_500, send_response};
 
 /// Sirve archivos estáticos según server.root/location.root + index.
 pub async fn serve_static(

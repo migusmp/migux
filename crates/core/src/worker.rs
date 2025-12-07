@@ -1,19 +1,16 @@
 use std::sync::Arc;
 
+use migux_http::responses::send_404;
+use migux_proxy::serve_proxy;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 
 use migux_config::{LocationType, MiguxConfig};
 
 use crate::ServerRuntime;
 
-// Submódulos del worker
-mod proxy;
-mod responses;
 mod routing;
 mod static_files;
 
-use proxy::serve_proxy;
-use responses::send_404;
 use routing::{match_location, parse_request_line, select_default_server};
 use static_files::serve_static;
 
@@ -68,16 +65,7 @@ pub async fn handle_connection(
         }
         LocationType::Proxy => {
             // Proxy: aceptamos cualquier método y reenviamos headers + body
-            serve_proxy(
-                &mut stream,
-                server,
-                location,
-                path,
-                &req_headers,
-                &req_body,
-                &cfg,
-            )
-            .await?;
+            serve_proxy(&mut stream, location, path, &req_headers, &req_body, &cfg).await?;
         }
     }
 

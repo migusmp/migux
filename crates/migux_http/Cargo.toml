@@ -7,4 +7,5 @@ edition = "2024"
 
 httparse = { workspace = true }
 tokio = { workspace = true }
+anyhow = { workspace = true }
 

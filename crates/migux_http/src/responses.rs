@@ -1,6 +1,4 @@
-use tokio::{fs, io::AsyncWriteExt, net::TcpStream};
-
-use crate::ServerRuntime;
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 /// Helper genérico para enviar una respuesta HTTP con cuerpo binario.
 pub async fn send_response(
@@ -55,28 +53,32 @@ pub async fn send_500(stream: &mut TcpStream) -> anyhow::Result<()> {
     .await
 }
 
+pub async fn send_502(stream: &mut TcpStream) -> anyhow::Result<()> {
+    send_text_response(stream, "502 Bad Gateway", "502 Bad Gateway\n").await
+}
+
 pub async fn send_405(stream: &mut TcpStream) -> anyhow::Result<()> {
     send_text_response(stream, "405 Method Not Allowed", "405 Method Not Allowed\n").await
 }
 
-/// (DEPRECATED) servir index usando la misma lógica genérica.
-pub async fn serve_index(stream: &mut TcpStream, server: &ServerRuntime) -> anyhow::Result<()> {
-    let file_path = format!("{}/{}", server.config.root, server.config.index);
-    println!("[worker] serving file: {}", file_path);
-
-    match fs::read(&file_path).await {
-        Ok(body) => {
-            send_response(stream, "200 OK", "text/html; charset=utf-8", &body).await?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("[worker] index not found {}: {:?}", file_path, e);
-            send_404(stream).await?;
-        }
-        Err(e) => {
-            eprintln!("[worker] error reading {}: {:?}", file_path, e);
-            send_500(stream).await?;
-        }
-    }
-
-    Ok(())
-}
+// (DEPRECATED) servir index usando la misma lógica genérica.
+// pub async fn serve_index(stream: &mut TcpStream, server: &ServerRuntime) -> anyhow::Result<()> {
+//     let file_path = format!("{}/{}", server.config.root, server.config.index);
+//     println!("[worker] serving file: {}", file_path);
+//
+//     match fs::read(&file_path).await {
+//         Ok(body) => {
+//             send_response(stream, "200 OK", "text/html; charset=utf-8", &body).await?;
+//         }
+//         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+//             eprintln!("[worker] index not found {}: {:?}", file_path, e);
+//             send_404(stream).await?;
+//         }
+//         Err(e) => {
+//             eprintln!("[worker] error reading {}: {:?}", file_path, e);
+//             send_500(stream).await?;
+//         }
+//     }
+//
+//     Ok(())
+// }

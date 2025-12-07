@@ -48,7 +48,7 @@ members = [
                              # - Optional caching
                              # - Directory index support
 
-    "crates/proxy",          # PROXY:
+    "crates/migux_proxy",          # PROXY:
                              # Reverse proxy:
                              # - Connects to upstream HTTP servers
                              # - Streams request/response bodies
