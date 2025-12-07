@@ -200,7 +200,6 @@ async fn serve_index(
 
     Ok(())
 }
-
 async fn send_404(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
     let body = b"404 Not Found\n";
     let response = format!(
