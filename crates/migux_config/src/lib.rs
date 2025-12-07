@@ -67,7 +67,7 @@ impl Default for UpstreamConfig {
 // =======================================================
 // SERVER CONFIG + DEFAULTS
 // =======================================================
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ServerConfig {
     pub listen: String,
@@ -90,7 +90,7 @@ impl Default for ServerConfig {
 // =======================================================
 // LOCATION TYPE (enum tipado)
 // =======================================================
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub enum LocationType {
     #[serde(rename = "static")]
     Static,
@@ -107,7 +107,7 @@ impl Default for LocationType {
 // =======================================================
 // LOCATION CONFIG + DEFAULTS
 // =======================================================
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct LocationConfig {
     pub server: String,
@@ -148,7 +148,8 @@ pub struct MiguxConfig {
     pub upstream: HashMap<String, UpstreamConfig>,
 
     #[serde(default)]
-    pub server: HashMap<String, ServerConfig>,
+    #[serde(rename = "server")]
+    pub servers: HashMap<String, ServerConfig>,
 
     #[serde(default)]
     pub location: HashMap<String, LocationConfig>,
@@ -161,7 +162,7 @@ impl Default for MiguxConfig {
             global: GlobalConfig::default(),
             http: HttpConfig::default(),
             upstream: HashMap::new(),
-            server: HashMap::new(),
+            servers: HashMap::new(),
             location: HashMap::new(),
         };
         cfg.apply_defaults();
@@ -170,8 +171,6 @@ impl Default for MiguxConfig {
 }
 
 impl MiguxConfig {
-    /// Cargar configuración desde un fichero INI.
-    /// Devuelve Result para que el caller decida qué hacer con los errores.
     pub fn from_file(file_name: &str) -> Result<Self, config::ConfigError> {
         let built = config::Config::builder()
             .add_source(
@@ -179,14 +178,12 @@ impl MiguxConfig {
             )
             .build()?; // Propaga error de build
 
-        let mut cfg: MiguxConfig = built.try_deserialize()?; // Propaga error de parseo
+        let mut cfg: MiguxConfig = built.try_deserialize()?;
 
         cfg.apply_defaults();
         Ok(cfg)
     }
 
-    /// Fallback cómodo: intenta leer fichero, y si falla,
-    /// usa MiguxConfig::default().
     pub fn from_file_or_default(file_name: &str) -> Self {
         match Self::from_file(file_name) {
             Ok(cfg) => cfg,
@@ -229,7 +226,7 @@ impl MiguxConfig {
         // SERVERS
         let def_server = ServerConfig::default();
 
-        for (_, s) in &mut self.server {
+        for (_, s) in &mut self.servers {
             if s.listen.is_empty() {
                 s.listen = def_server.listen.clone();
             }
@@ -248,14 +245,14 @@ impl MiguxConfig {
         for (_, l) in &mut self.location {
             // Default root = root del server al que pertenece
             if l.root.is_none() {
-                if let Some(srv) = self.server.get(&l.server) {
+                if let Some(srv) = self.servers.get(&l.server) {
                     l.root = Some(srv.root.clone());
                 }
             }
 
             // Default index = index del server
             if l.index.is_none() {
-                if let Some(srv) = self.server.get(&l.server) {
+                if let Some(srv) = self.servers.get(&l.server) {
                     l.index = Some(srv.index.clone());
                 }
             }
@@ -297,7 +294,7 @@ impl MiguxConfig {
         }
 
         println!("\n[server]");
-        for (name, srv) in &self.server {
+        for (name, srv) in &self.servers {
             println!("  server {}:", name);
             println!("    listen      = {}", srv.listen);
             println!("    server_name = {}", srv.server_name);

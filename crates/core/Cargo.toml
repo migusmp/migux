@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 migux_config = { path="../migux_config" }
 dashmap = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }

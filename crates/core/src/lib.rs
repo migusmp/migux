@@ -1,4 +1,44 @@
-pub mod state;
+use std::collections::HashMap;
+
+use migux_config::{LocationConfig, MiguxConfig, ServerConfig};
+
+pub mod master;
+
+pub type ListenAddr = String;
+
+#[derive(Debug, Clone)]
+pub struct ServerRuntime {
+    /// Nombre lógico: "main", "api", etc. (clave del HashMap)
+    pub name: String,
+    pub config: ServerConfig,
+    pub locations: Vec<LocationConfig>,
+}
+
+pub type ServersByListen = HashMap<ListenAddr, Vec<ServerRuntime>>;
+
+pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
+    let mut map: ServersByListen = HashMap::new();
+
+    for (server_name, server_cfg) in &cfg.servers {
+        let listen_key = server_cfg.listen.clone(); // "0.0.0.0:8080"
+
+        // Filtramos locations que pertenecen a este server (`location.*` con server = "main")
+        let locations: Vec<LocationConfig> = cfg
+            .location
+            .values()
+            .filter(|loc| loc.server == *server_name)
+            .cloned()
+            .collect();
+
+        map.entry(listen_key).or_default().push(ServerRuntime {
+            name: server_name.clone(),
+            config: server_cfg.clone(),
+            locations,
+        });
+    }
+
+    map
+}
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

@@ -1,3 +1,5 @@
+use core::master::Master;
+
 use migux_config::MiguxConfig;
 
 #[tokio::main]
@@ -11,6 +13,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     cfg.print();
+
+    let master = Master::new(cfg);
+    let _ = master.run().await?;
 
     Ok(())
 }
