@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use dashmap::{self, DashMap};
 use migux_config::MiguxConfig;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Semaphore};
 
 use crate::{build_servers_by_listen, ServersByListen};
 
@@ -45,6 +45,10 @@ impl Master {
         );
         println!("log_level          = {}", self.cfg.global.log_level);
 
+        // 👇 límite de conexiones simultáneas en TODO el proceso (por ahora)
+        let max_conns = self.cfg.global.worker_connections as usize;
+        let semaphore = Arc::new(Semaphore::new(max_conns));
+
         println!("\n[listen sockets (Tokio)]");
         for (listen_addr, servers) in self.servers_by_listen.iter() {
             // Crear listener de Tokio
@@ -55,13 +59,52 @@ impl Master {
                 servers.len()
             );
 
-            // De momento lo soltamos aquí.
-            // Más adelante este `listener` se lo pasaremos a los workers.
-            drop(listener);
+            let addr = listen_addr.clone();
+            let sem_clone = semaphore.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = accept_loop(listener, addr, sem_clone).await {
+                    eprintln!("[accept-loop] error: {e:?}");
+                }
+            });
         }
 
         println!("==================================");
 
-        Ok(())
+        // Mantener el proceso vivo (por ahora) hasta que le hagas Ctrl+C
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
     }
+}
+
+async fn accept_loop(
+    listener: TcpListener,
+    listen_addr: String,
+    semaphore: Arc<Semaphore>,
+) -> anyhow::Result<()> {
+    loop {
+        let (stream, addr) = listener.accept().await?;
+
+        // 👇 Pedir un "permiso" del semáforo (si se agota, espera)
+        let permit = semaphore.clone().acquire_owned().await?;
+        println!("[master] new connection in {listen_addr} from {addr}");
+
+        // Aquí creamos el "worker lógico" por conexión
+        tokio::spawn(async move {
+            // Cuando este future termine, el `permit` se suelta solo al salir del scope
+            if let Err(e) = handle_connection(stream).await {
+                eprintln!("[worker] error handling {addr}: {e:?}");
+            }
+            drop(permit); // explícito para que se entienda
+        });
+    }
+}
+
+async fn handle_connection(stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+    // De momento solo registramos y cerramos.
+    // Aquí luego meteremos: leer request, parsear, router, static/proxy, etc.
+    println!("[worker] handling connection...");
+    drop(stream);
+    Ok(())
 }
