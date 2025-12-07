@@ -49,6 +49,8 @@ impl Master {
         let max_conns = self.cfg.global.worker_connections as usize;
         let semaphore = Arc::new(Semaphore::new(max_conns));
 
+        let cfg = self.cfg.clone();
+
         println!("\n[listen sockets (Tokio)]");
         for (listen_addr, servers) in self.servers_by_listen.iter() {
             // Crear listener de Tokio
@@ -62,10 +64,17 @@ impl Master {
             let addr = listen_addr.clone();
             let sem_clone = semaphore.clone();
             let servers_for_listener = servers.clone();
+            let cfg_clone = cfg.clone();
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    accept_loop(listener, addr, sem_clone, Arc::new(servers_for_listener)).await
+                if let Err(e) = accept_loop(
+                    listener,
+                    addr,
+                    sem_clone,
+                    Arc::new(servers_for_listener),
+                    cfg_clone,
+                )
+                .await
                 {
                     eprintln!("[accept-loop] error: {e:?}");
                 }
@@ -86,6 +95,7 @@ async fn accept_loop(
     listen_addr: String,
     semaphore: Arc<Semaphore>,
     servers: Arc<Vec<ServerRuntime>>,
+    cfg: Arc<MiguxConfig>,
 ) -> anyhow::Result<()> {
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -95,11 +105,12 @@ async fn accept_loop(
         println!("[master] new connection in {listen_addr} from {addr}");
 
         let servers_clone = servers.clone();
+        let cfg_clone = cfg.clone();
 
         // Aquí creamos el "worker lógico" por conexión
         tokio::spawn(async move {
             // Cuando este future termine, el `permit` se suelta solo al salir del scope
-            if let Err(e) = handle_connection(stream, servers_clone).await {
+            if let Err(e) = handle_connection(stream, servers_clone, cfg_clone).await {
                 eprintln!("[worker] error handling {addr}: {e:?}");
             }
             drop(permit); // explícito para que se entienda
