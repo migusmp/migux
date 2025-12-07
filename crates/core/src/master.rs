@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
-use tokio::fs;
+use tokio::{fs, net::TcpStream};
 
 use dashmap::{self, DashMap};
-use migux_config::MiguxConfig;
+use migux_config::{LocationConfig, LocationType, MiguxConfig};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -113,7 +113,7 @@ async fn accept_loop(
 }
 
 async fn handle_connection(
-    mut stream: tokio::net::TcpStream,
+    mut stream: TcpStream,
     servers: Arc<Vec<ServerRuntime>>,
 ) -> anyhow::Result<()> {
     let mut buf = [0u8; 1024];
@@ -142,20 +142,143 @@ async fn handle_connection(
         server.name, server.config.root, server.config.index
     );
 
-    // 👉 De momento: GET + "/" → servir index.html
-    if method == "GET" && path == "/" {
-        serve_index(&mut stream, server).await?;
-    } else {
-        // cualquier otra ruta → 404 simple
+    if server.locations.is_empty() {
+        // por si acaso no hubiera locations (no es tu caso)
         send_404(&mut stream).await?;
+        return Ok(());
     }
 
+    let location = match_location(&server.locations, path);
+    println!(
+        "[worker] matched location: server={}, path={}, type={:?}",
+        location.server, location.path, location.r#type
+    );
+
+    if method != "GET" {
+        // De momento solo GET
+        send_404(&mut stream).await?;
+        return Ok(());
+    }
+
+    match location.r#type {
+        LocationType::Static => {
+            serve_static(&mut stream, server, location, path).await?;
+        }
+        LocationType::Proxy => {
+            // TODO: proxy → upstream.app
+            send_501(&mut stream).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn serve_static(
+    stream: &mut TcpStream,
+    server: &ServerRuntime,
+    location: &LocationConfig,
+    req_path: &str,
+) -> anyhow::Result<()> {
+    // root efectiva: location.root o server.root
+    let root = location.root.as_deref().unwrap_or(&server.config.root);
+
+    // index efectivo: location.index o server.index
+    let index = location.index.as_deref().unwrap_or(&server.config.index);
+
+    // Path relativo dentro del root
+    let rel = if req_path == location.path {
+        // si piden justo el path de la location → index
+        index.to_string()
+    } else if req_path.starts_with(&location.path) {
+        let mut tail = &req_path[location.path.len()..]; // quitar prefijo de location
+        if tail.starts_with('/') {
+            tail = &tail[1..];
+        }
+        if tail.is_empty() {
+            index.to_string()
+        } else {
+            tail.to_string()
+        }
+    } else if req_path == "/" && location.path == "/" {
+        // caso típico: location "/" y petición "/"
+        index.to_string()
+    } else {
+        // no encaja bien → 404
+        send_404(stream).await?;
+        return Ok(());
+    };
+
+    let file_path = format!("{}/{}", root, rel);
+    println!("[worker] static file: {}", file_path);
+
+    match fs::read(&file_path).await {
+        Ok(body) => {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n",
+                body.len()
+            );
+
+            stream.write_all(response.as_bytes()).await?;
+            stream.write_all(&body).await?;
+            stream.flush().await?;
+        }
+        Err(e) => {
+            eprintln!("[worker] error reading {}: {:?}", file_path, e);
+            let body = b"Internal Server Error\n";
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.write_all(body).await?;
+            stream.flush().await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn send_501(stream: &mut TcpStream) -> anyhow::Result<()> {
+    let body = b"501 Not Implemented (proxy TODO)\n";
+    let response = format!(
+        "HTTP/1.1 501 Not Implemented\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        body.len()
+    );
+
+    stream.write_all(response.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
     Ok(())
 }
 
 fn select_default_server<'a>(servers: &'a [ServerRuntime]) -> &'a ServerRuntime {
     // De momento, simplemente el primero
     &servers[0]
+}
+
+fn match_location<'a>(locations: &'a [LocationConfig], path: &str) -> &'a LocationConfig {
+    // Elegimos la location cuyo `path` sea prefijo del path de la request
+    // y con el `path` más largo (estilo nginx).
+    locations
+        .iter()
+        .filter(|loc| path.starts_with(&loc.path))
+        .max_by_key(|loc| loc.path.len())
+        .unwrap_or_else(|| {
+            // fallback: primera location, si no hay prefijo que encaje
+            &locations[0]
+        })
 }
 
 async fn serve_index(

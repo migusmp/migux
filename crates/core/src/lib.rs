@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use migux_config::{LocationConfig, MiguxConfig, ServerConfig};
+use migux_config::{LocationConfig, LocationType, MiguxConfig, ServerConfig};
 
 pub mod master;
 
@@ -23,12 +23,25 @@ pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
         let listen_key = server_cfg.listen.clone(); // "0.0.0.0:8080"
 
         // Filtramos locations que pertenecen a este server (`location.*` con server = "main")
-        let locations: Vec<LocationConfig> = cfg
+        let mut locations: Vec<LocationConfig> = cfg
             .location
             .values()
             .filter(|loc| loc.server == *server_name)
             .cloned()
             .collect();
+
+        // 👇 SI NO HAY LOCATIONS, CREAMOS UNA POR DEFECTO
+        if locations.is_empty() {
+            locations.push(LocationConfig {
+                server: server_name.clone(),
+                path: "/".into(),
+                r#type: LocationType::Static,
+                root: Some(server_cfg.root.clone()),
+                index: Some(server_cfg.index.clone()),
+                upstream: None,
+                strip_prefix: None,
+            });
+        }
 
         map.entry(listen_key).or_default().push(ServerRuntime {
             name: server_name.clone(),
