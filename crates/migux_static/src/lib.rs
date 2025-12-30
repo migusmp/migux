@@ -1,62 +1,85 @@
-use migux_http::responses::{send_404, send_500, send_response};
 use mime_guess::mime;
-use tokio::{fs, net::TcpStream};
+use tokio::{fs, io::AsyncWriteExt, net::TcpStream};
 
 use migux_config::{LocationConfig, ServerConfig};
 
-/// Sirve archivos estáticos según server.root/location.root + index.
+fn build_response_bytes(status: &str, content_type: Option<&str>, body: &[u8]) -> Vec<u8> {
+    let mut headers = String::new();
+
+    headers.push_str(&format!("HTTP/1.1 {}\r\n", status));
+    headers.push_str(&format!("Content-Length: {}\r\n", body.len()));
+
+    if let Some(ct) = content_type {
+        headers.push_str(&format!("Content-Type: {}\r\n", ct));
+    }
+
+    // básico (luego le metes keep-alive si quieres)
+    headers.push_str("Connection: close\r\n");
+    headers.push_str("\r\n");
+
+    let mut out = headers.into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
+fn build_404() -> Vec<u8> {
+    let body = b"404 Not Found";
+    build_response_bytes("404 Not Found", Some("text/plain; charset=utf-8"), body)
+}
+
+fn build_500() -> Vec<u8> {
+    let body = b"500 Internal Server Error";
+    build_response_bytes(
+        "500 Internal Server Error",
+        Some("text/plain; charset=utf-8"),
+        body,
+    )
+}
+
 pub async fn serve_static(
     stream: &mut TcpStream,
     server_cfg: &ServerConfig,
     location: &LocationConfig,
     req_path: &str,
 ) -> anyhow::Result<()> {
+    let resp = serve_static_bytes(server_cfg, location, req_path).await?;
+    stream.write_all(&resp).await?;
+    Ok(())
+}
+
+pub async fn serve_static_bytes(
+    server_cfg: &ServerConfig,
+    location: &LocationConfig,
+    req_path: &str,
+) -> anyhow::Result<Vec<u8>> {
     let root = location.root.as_deref().unwrap_or(&server_cfg.root);
     let index = location.index.as_deref().unwrap_or(&server_cfg.index);
 
     // Resolver path relativo dentro de `root`
     let rel = resolve_relative_path(req_path, &location.path, index);
 
-    // Si la ruta del archivo estatico no existe, retorna un código 404
-    if rel.is_none() {
-        // no matchea realmente esa location
-        send_404(stream).await?;
-        return Ok(());
-    }
+    // Si no matchea realmente esa location → 404
+    let Some(rel) = rel else {
+        return Ok(build_404());
+    };
 
-    let rel = rel.unwrap();
     let file_path = format!("{}/{}", root, rel);
-    println!("[worker] static file: {}", file_path);
 
     match fs::read(&file_path).await {
         Ok(body) => {
-            // Guess the MIME type based on the file extension
-            // (e.g. .html -> text/html, .css -> text/css, .png -> image/png)
             let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
 
-            // Build the Content-Type header
-            // - For text-based files, explicitly add UTF-8 charset
-            // - For binary files (images, videos, etc.), do not add charset
             let content_type = if mime.type_() == mime::TEXT {
                 format!("{}; charset=utf-8", mime.essence_str())
             } else {
                 mime.essence_str().to_string()
             };
 
-            // Send a 200 OK response with the correct Content-Type
-            send_response(stream, "200 OK", &content_type, &body).await?;
+            Ok(build_response_bytes("200 OK", Some(&content_type), &body))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("[worker] file not found {}: {:?}", file_path, e);
-            send_404(stream).await?;
-        }
-        Err(e) => {
-            eprintln!("[worker] error reading {}: {:?}", file_path, e);
-            send_500(stream).await?;
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(build_404()),
+        Err(_) => Ok(build_500()),
     }
-
-    Ok(())
 }
 
 /// Resuelve la ruta relativa al root, teniendo en cuenta el index y el prefijo.
@@ -70,7 +93,7 @@ fn resolve_relative_path(req_path: &str, location_path: &str, index: &str) -> Op
     }
 
     if req_path.starts_with(location_path) {
-        let mut tail = &req_path[location_path.len()..]; // strip prefix
+        let mut tail = &req_path[location_path.len()..];
 
         if tail.starts_with('/') {
             tail = &tail[1..];

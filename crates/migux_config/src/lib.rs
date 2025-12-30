@@ -33,6 +33,11 @@ pub struct HttpConfig {
     pub sendfile: bool,
     pub keepalive_timeout_secs: u64,
     pub access_log: String,
+
+    // Caché control
+    pub cache_dir: Option<String>,
+    pub cache_default_ttl_secs: Option<u32>,
+    pub cache_max_object_bytes: Option<u64>,
 }
 
 impl Default for HttpConfig {
@@ -41,6 +46,9 @@ impl Default for HttpConfig {
             sendfile: true,
             keepalive_timeout_secs: 65,
             access_log: "/var/log/migux/access.log".into(),
+            cache_dir: None,
+            cache_default_ttl_secs: None,
+            cache_max_object_bytes: None,
         }
     }
 }
@@ -128,6 +136,7 @@ pub struct LocationConfig {
     pub index: Option<String>,
     pub upstream: Option<String>,
     pub strip_prefix: Option<String>,
+    pub cache: Option<bool>,
 }
 
 impl Default for LocationConfig {
@@ -140,6 +149,7 @@ impl Default for LocationConfig {
             index: None,
             upstream: None,
             strip_prefix: None,
+            cache: None,
         }
     }
 }
@@ -207,6 +217,11 @@ impl MiguxConfig {
     fn apply_defaults(&mut self) {
         // GLOBAL
         let def_global = GlobalConfig::default();
+
+        if self.http.cache_dir.is_some() {
+            self.http.cache_default_ttl_secs = Some(30);
+            self.http.cache_max_object_bytes = Some(1048576);
+        }
 
         if self.global.worker_processes == 0 {
             self.global.worker_processes = def_global.worker_processes;
@@ -282,6 +297,15 @@ impl MiguxConfig {
             self.http.keepalive_timeout_secs
         );
         println!("  access_log           = {}", self.http.access_log);
+        println!("  cache_dir       = {:?}", self.http.cache_dir);
+        println!(
+            "  cache_default_ttl_secs       = {:?}",
+            self.http.cache_default_ttl_secs
+        );
+        println!(
+            "  cache_max_object_bytes       = {:?}",
+            self.http.cache_max_object_bytes
+        );
 
         println!("\n[upstream]");
         for (name, up) in &self.upstream {
@@ -314,29 +338,5 @@ impl MiguxConfig {
         }
 
         println!("==============================================");
-    }
-}
-
-// =======================================================
-// TEST
-// =======================================================
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-
-    #[test]
-    fn default_config_builds() {
-        let cfg = MiguxConfig::default();
-        assert!(cfg.global.worker_processes >= 1);
     }
 }

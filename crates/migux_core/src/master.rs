@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use dashmap::{self, DashMap};
+use migux_cache::manager::CacheManager;
 use migux_config::MiguxConfig;
 use tokio::{net::TcpListener, sync::Semaphore};
 use tracing::{debug, error, info, instrument, warn};
@@ -23,7 +24,6 @@ impl Default for CacheStore {
 pub struct Master {
     cfg: Arc<MiguxConfig>,
     servers_by_listen: Arc<ServersByListen>,
-    cache: CacheStore,
 }
 
 impl Master {
@@ -34,7 +34,6 @@ impl Master {
         Self {
             cfg,
             servers_by_listen,
-            cache: CacheStore::default(),
         }
     }
 
@@ -210,6 +209,7 @@ async fn accept_loop(
         let servers_clone = servers.clone();
         let cfg_clone = cfg.clone();
         let listen_for_span = listen_this.clone();
+        let cache_manager = Arc::new(CacheManager::new());
 
         tokio::spawn(async move {
             let span = tracing::info_span!(
@@ -224,7 +224,9 @@ async fn accept_loop(
                 "Worker spawned for incoming connection"
             );
 
-            if let Err(e) = handle_connection(stream, addr, servers_clone, cfg_clone).await {
+            if let Err(e) =
+                handle_connection(stream, addr, servers_clone, cfg_clone, cache_manager).await
+            {
                 error!(
                     target: "migux::worker",
                     client_addr = %addr,

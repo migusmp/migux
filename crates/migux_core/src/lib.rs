@@ -50,6 +50,7 @@ pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
                 index: Some(server_cfg.index.clone()),
                 upstream: None,
                 strip_prefix: None,
+                cache: None,
             });
         }
 

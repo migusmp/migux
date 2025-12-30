@@ -7,14 +7,13 @@ use std::{
 };
 
 use dashmap::DashMap;
+use migux_config::{LocationConfig, MiguxConfig, UpstreamConfig, UpstreamServers};
 use migux_http::responses::{send_404, send_502};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 use tracing::{debug, error, info, instrument, warn};
-
-use migux_config::{LocationConfig, MiguxConfig, UpstreamConfig, UpstreamServers};
 
 /// Global map: upstream name -> counter for round-robin
 static UPSTREAM_COUNTERS: OnceLock<DashMap<String, AtomicUsize>> = OnceLock::new();
@@ -30,25 +29,22 @@ fn upstream_pools() -> &'static DashMap<String, Vec<TcpStream>> {
     UPSTREAM_POOLS.get_or_init(|| DashMap::new())
 }
 
+async fn connect_fresh(addr: &str) -> anyhow::Result<TcpStream> {
+    Ok(TcpStream::connect(addr).await?)
+}
+
 /// Apply nginx-style strip_prefix:
-/// - If `req_path` starts with `location_path`, remove the prefix.
-/// - Ensure the result starts with "/".
-/// - If empty, return "/".
 pub fn strip_prefix_path(req_path: &str, location_path: &str) -> String {
-    // If it doesn't match, return the original path unchanged.
     if !req_path.starts_with(location_path) {
         return req_path.to_string();
     }
 
-    // Tail after the prefix
     let mut tail = req_path[location_path.len()..].to_string();
 
-    // If the tail is empty → "/"
     if tail.is_empty() {
         return "/".to_string();
     }
 
-    // Ensure it starts with "/"
     if !tail.starts_with('/') {
         tail.insert(0, '/');
     }
@@ -57,18 +53,15 @@ pub fn strip_prefix_path(req_path: &str, location_path: &str) -> String {
 }
 
 /// Parse possible `server` formats:
-/// - "127.0.0.1:3000"
-/// - "[\"127.0.0.1:3000\", \"127.0.0.1:3001\"]"
 fn parse_servers_from_one(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
 
     if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        let inner = &trimmed[1..trimmed.len() - 1]; // without [ ]
+        let inner = &trimmed[1..trimmed.len() - 1];
         inner
             .split(',')
             .filter_map(|part| {
-                let part = part.trim();
-                let part = part.trim_matches('"');
+                let part = part.trim().trim_matches('"');
                 if part.is_empty() {
                     None
                 } else {
@@ -95,9 +88,7 @@ fn normalize_servers(cfg: &UpstreamConfig) -> anyhow::Result<Vec<String>> {
     Ok(servers)
 }
 
-/// Returns the list of upstream servers in the order they should be tried:
-/// - If only one or strategy != round_robin → the original list
-/// - If round_robin and multiple: [current, next, next, ...] (for fallback)
+/// Returns upstream servers in rr order + fallback order
 fn choose_upstream_addrs_rr_order(
     upstream_name: &str,
     upstream_cfg: &UpstreamConfig,
@@ -132,16 +123,16 @@ fn choose_upstream_addrs_rr_order(
 
 /// Rewrites headers for proxy:
 /// - removes previous X-Forwarded-*
-/// - preserves the original Host
-/// - appends:
-///   * X-Forwarded-For
-///   * X-Real-IP
-///   * X-Forwarded-Proto
-///   * X-Forwarded-Host
+/// - removes hop-by-hop headers (Connection, TE, etc.)
+/// - preserves original Host (for X-Forwarded-Host)
+/// - appends X-Forwarded-*
+///
+/// IMPORTANT: We also force `Connection: close` to upstream by default here to
+/// reduce weird keep-alive behavior while you iterate. If you want full keep-alive
+/// later, remove it and implement chunked + http/1.0 rules properly.
 fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
-    // Skip the first line (request line)
     let mut lines = req_headers.lines();
-    let _ = lines.next();
+    let _ = lines.next(); // request line
 
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut host_value: Option<String> = None;
@@ -153,25 +144,39 @@ fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
         }
 
         if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_string();
-            let value = value.trim().to_string();
+            let name_trim = name.trim().to_string();
+            let value_trim = value.trim().to_string();
 
-            if name.eq_ignore_ascii_case("host") {
-                host_value = Some(value.clone());
+            if name_trim.eq_ignore_ascii_case("host") {
+                host_value = Some(value_trim.clone());
             }
 
-            if name.eq_ignore_ascii_case("x-forwarded-for")
-                || name.eq_ignore_ascii_case("x-real-ip")
-                || name.eq_ignore_ascii_case("x-forwarded-proto")
-                || name.eq_ignore_ascii_case("x-forwarded-host")
+            // Drop previous forwarded headers
+            if name_trim.eq_ignore_ascii_case("x-forwarded-for")
+                || name_trim.eq_ignore_ascii_case("x-real-ip")
+                || name_trim.eq_ignore_ascii_case("x-forwarded-proto")
+                || name_trim.eq_ignore_ascii_case("x-forwarded-host")
             {
                 continue;
             }
 
-            headers.push((name, value));
+            // Drop hop-by-hop headers (proxy must manage these)
+            if name_trim.eq_ignore_ascii_case("connection")
+                || name_trim.eq_ignore_ascii_case("keep-alive")
+                || name_trim.eq_ignore_ascii_case("proxy-connection")
+                || name_trim.eq_ignore_ascii_case("te")
+                || name_trim.eq_ignore_ascii_case("trailer")
+                || name_trim.eq_ignore_ascii_case("transfer-encoding")
+                || name_trim.eq_ignore_ascii_case("upgrade")
+            {
+                continue;
+            }
+
+            headers.push((name_trim, value_trim));
         }
     }
 
+    // Add forward headers
     headers.push(("X-Forwarded-For".to_string(), client_ip.to_string()));
     headers.push(("X-Real-IP".to_string(), client_ip.to_string()));
     headers.push(("X-Forwarded-Proto".to_string(), "http".to_string()));
@@ -179,6 +184,9 @@ fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
     if let Some(h) = host_value {
         headers.push(("X-Forwarded-Host".to_string(), h));
     }
+
+    // Force upstream close for now (safer during early proxy work)
+    headers.push(("Connection".to_string(), "close".to_string()));
 
     let mut out = String::new();
     for (name, value) in headers {
@@ -198,25 +206,16 @@ async fn checkout_upstream_stream(addr: &str) -> anyhow::Result<TcpStream> {
 
     if let Some(mut entry) = pools.get_mut(addr) {
         if let Some(stream) = entry.pop() {
-            debug!(
-                target: "migux::proxy",
-                upstream = %addr,
-                "Reusing persistent upstream connection"
-            );
+            debug!(target: "migux::proxy", upstream = %addr, "Reusing pooled upstream connection");
             return Ok(stream);
         }
     }
 
-    info!(
-        target: "migux::proxy",
-        upstream = %addr,
-        "Creating new upstream connection"
-    );
-    let stream = TcpStream::connect(addr).await?;
-    Ok(stream)
+    info!(target: "migux::proxy", upstream = %addr, "Creating new upstream connection");
+    Ok(TcpStream::connect(addr).await?)
 }
 
-/// Returns a healthy upstream connection back to the pool so it can be reused.
+/// Returns an upstream connection back to the pool so it can be reused.
 fn checkin_upstream_stream(addr: &str, stream: TcpStream) {
     let pools = upstream_pools();
     pools
@@ -224,34 +223,27 @@ fn checkin_upstream_stream(addr: &str, stream: TcpStream) {
         .or_insert_with(Vec::new)
         .push(stream);
 
-    debug!(
-        target: "migux::proxy",
-        upstream = %addr,
-        "Returned upstream connection to pool"
-    );
+    debug!(target: "migux::proxy", upstream = %addr, "Returned upstream connection to pool");
 }
 
-/// Reads an HTTP response from the upstream and decides whether the connection
-/// can be reused:
-/// - Reads headers until `\r\n\r\n`
-/// - Looks for Content-Length and Connection
-/// - If Content-Length present: reads exactly that many bytes; connection may be reused
-///   (unless `Connection: close`).
-/// - If NO Content-Length: reads until EOF and does NOT reuse the connection.
+/// Reads an HTTP response from the upstream.
+/// Decides reusability:
+/// - If Content-Length present and Connection != close => reusable
+/// - If HTTP/1.0 => ONLY reusable if `Connection: keep-alive`
+/// - If Transfer-Encoding: chunked => mark NOT reusable (until you implement chunk parsing)
 #[instrument(skip(stream))]
 async fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, bool)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let mut headers_end: Option<usize> = None;
 
-    // Read until end of headers
     loop {
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
             if buf.is_empty() {
-                anyhow::bail!("Upstream closed the connection without sending a response");
+                anyhow::bail!("Upstream closed connection without sending a response");
             } else {
-                anyhow::bail!("Upstream closed the connection while reading headers");
+                anyhow::bail!("Upstream closed connection while reading headers");
             }
         }
         buf.extend_from_slice(&tmp[..n]);
@@ -262,7 +254,7 @@ async fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, 
         }
 
         if buf.len() > 64 * 1024 {
-            anyhow::bail!("Upstream response headers are too large");
+            anyhow::bail!("Upstream response headers too large");
         }
     }
 
@@ -272,36 +264,68 @@ async fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, 
 
     let mut content_length: Option<usize> = None;
     let mut connection_close = false;
+    let mut connection_keep_alive = false;
+    let mut is_http10 = false;
+    let mut is_chunked = false;
 
     let mut lines = header_str.lines();
 
     if let Some(status_line) = lines.next() {
-        debug!(
-            target: "migux::proxy",
-            status_line = %status_line,
-            "Received upstream status line"
-        );
+        debug!(target: "migux::proxy", status_line = %status_line, "Received upstream status line");
+        if status_line.contains("HTTP/1.0") {
+            is_http10 = true;
+        }
     }
 
     for line in lines {
         let lower = line.to_ascii_lowercase();
+
         if let Some(rest) = lower.strip_prefix("content-length:") {
             if let Ok(len) = rest.trim().parse::<usize>() {
                 content_length = Some(len);
             }
         }
+
         if let Some(rest) = lower.strip_prefix("connection:") {
-            if rest.trim() == "close" {
+            let v = rest.trim();
+            if v == "close" {
                 connection_close = true;
+            } else if v.contains("keep-alive") {
+                connection_keep_alive = true;
+            }
+        }
+
+        if let Some(rest) = lower.strip_prefix("transfer-encoding:") {
+            if rest.trim().contains("chunked") {
+                is_chunked = true;
             }
         }
     }
 
     let mut response_bytes = Vec::new();
-    // Headers + CRLFCRLF
     response_bytes.extend_from_slice(&buf[..headers_end + 4]);
 
     let already_body = buf.len().saturating_sub(headers_end + 4);
+
+    // If chunked and we don't parse it yet, safest is: read to EOF and never reuse
+    if is_chunked {
+        if already_body > 0 {
+            response_bytes.extend_from_slice(&buf[headers_end + 4..]);
+        }
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                break;
+            }
+            response_bytes.extend_from_slice(&tmp[..n]);
+        }
+
+        debug!(
+            target: "migux::proxy",
+            "Chunked response detected; returning non-reusable connection (chunk parser not implemented)"
+        );
+        return Ok((response_bytes, false));
+    }
 
     if let Some(cl) = content_length {
         let mut body = Vec::with_capacity(cl);
@@ -319,7 +343,7 @@ async fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, 
                     target: "migux::proxy",
                     expected = cl,
                     got = body.len(),
-                    "Upstream closed connection before full body was read"
+                    "Upstream closed before full body was read"
                 );
                 break;
             }
@@ -330,13 +354,21 @@ async fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, 
 
         response_bytes.extend_from_slice(&body);
 
-        let reusable = !connection_close;
+        // HTTP/1.0: only reuse if explicit keep-alive and not close
+        let reusable = if is_http10 {
+            connection_keep_alive && !connection_close
+        } else {
+            !connection_close
+        };
+
         debug!(
             target: "migux::proxy",
             content_length = cl,
             reusable,
+            http10 = is_http10,
             "Finished reading upstream response with Content-Length"
         );
+
         Ok((response_bytes, reusable))
     } else {
         // No Content-Length → read until EOF and do not reuse
@@ -353,26 +385,15 @@ async fn read_http_response(stream: &mut TcpStream) -> anyhow::Result<(Vec<u8>, 
 
         debug!(
             target: "migux::proxy",
-            "Finished reading upstream response without Content-Length (connection not reusable)"
+            "No Content-Length; read until EOF; connection not reusable"
         );
         Ok((response_bytes, false))
     }
 }
 
-/// Proxy logic:
-/// - Resolves upstream and strategy (round_robin or single)
-/// - Applies strip_prefix to the request path
-/// - Rewrites the request line (METHOD PATH HTTP/x.y)
-/// - Rewrites headers and injects X-Forwarded-*
-/// - Tries multiple upstreams in order (fallback)
-/// - Reuses persistent connections when possible (keep-alive)
-/// - Streams upstream response back to the client
 #[instrument(
     skip(client_stream, location, req_headers, req_body, cfg),
-    fields(
-        client = %client_addr,
-        location_path = %location.path,
-    )
+    fields(client = %client_addr, location_path = %location.path)
 )]
 pub async fn serve_proxy(
     client_stream: &mut TcpStream,
@@ -383,7 +404,6 @@ pub async fn serve_proxy(
     cfg: &Arc<MiguxConfig>,
     client_addr: &SocketAddr,
 ) -> anyhow::Result<()> {
-    // 0) Resolve upstream from config
     let upstream_name = location
         .upstream
         .as_ref()
@@ -394,24 +414,15 @@ pub async fn serve_proxy(
         .get(upstream_name)
         .ok_or_else(|| anyhow::anyhow!("Upstream '{}' not found in config", upstream_name))?;
 
-    // Candidates in preference order (round-robin + fallback)
     let candidate_addrs = choose_upstream_addrs_rr_order(upstream_name, upstream_cfg)?;
-
     let client_ip = client_addr.ip().to_string();
-
-    // 1) strip_prefix: remove location.path from the request path
     let upstream_path = strip_prefix_path(req_path, &location.path);
 
-    // 2) Parse the original request line
     let mut lines = req_headers.lines();
-
     let first_line = match lines.next() {
         Some(l) => l,
         None => {
-            warn!(
-                target: "migux::proxy",
-                "Missing request line in headers; returning 404"
-            );
+            warn!(target: "migux::proxy", "Missing request line; returning 404");
             send_404(client_stream).await?;
             return Ok(());
         }
@@ -432,30 +443,23 @@ pub async fn serve_proxy(
         "Preparing proxied request"
     );
 
-    // 3) Rewrite headers with X-Forwarded-*
     let rest_of_headers = rewrite_proxy_headers(req_headers, &client_ip);
 
-    // Rebuild request for upstream
     let mut out = Vec::new();
     let start_line = format!("{method} {upstream_path} {http_version}\r\n");
     out.extend_from_slice(start_line.as_bytes());
     out.extend_from_slice(rest_of_headers.as_bytes());
-    out.extend_from_slice(b"\r\n"); // end of headers
-    out.extend_from_slice(req_body); // raw body
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(req_body);
 
     let mut last_err: Option<anyhow::Error> = None;
 
-    // 4) Try connecting to upstreams in order (fallback + keep-alive)
     for upstream_addr in &candidate_addrs {
+        // 1) take from pool or connect
         let mut upstream_stream = match checkout_upstream_stream(upstream_addr).await {
             Ok(s) => s,
             Err(e) => {
-                error!(
-                    target: "migux::proxy",
-                    upstream = %upstream_addr,
-                    error = ?e,
-                    "Failed to get upstream connection"
-                );
+                error!(target: "migux::proxy", upstream=%upstream_addr, error=?e, "Failed to get upstream connection");
                 last_err = Some(e);
                 continue;
             }
@@ -471,20 +475,43 @@ pub async fn serve_proxy(
             "Forwarding request to upstream"
         );
 
+        // 2) write: if pooled socket is dead, retry once with fresh connection to SAME addr
         if let Err(e) = upstream_stream.write_all(&out).await {
             error!(
                 target: "migux::proxy",
                 upstream_addr = %upstream_addr,
                 error = ?e,
-                "Error writing request to upstream"
+                "Write failed (likely dead pooled socket). Retrying with fresh connection"
             );
             last_err = Some(e.into());
-            // Do not return this connection to the pool
-            continue;
+
+            match connect_fresh(upstream_addr).await {
+                Ok(mut fresh) => {
+                    if let Err(e2) = fresh.write_all(&out).await {
+                        error!(
+                            target: "migux::proxy",
+                            upstream_addr = %upstream_addr,
+                            error = ?e2,
+                            "Write failed even with fresh connection"
+                        );
+                        last_err = Some(e2.into());
+                        continue;
+                    }
+                    upstream_stream = fresh;
+                }
+                Err(e2) => {
+                    error!(
+                        target: "migux::proxy",
+                        upstream_addr = %upstream_addr,
+                        error = ?e2,
+                        "Failed to connect fresh after pooled write failure"
+                    );
+                    last_err = Some(e2);
+                    continue;
+                }
+            }
         }
 
-        // Read upstream response (single HTTP response) and decide if the
-        // connection can be reused.
         let (resp_bytes, reusable) = match read_http_response(&mut upstream_stream).await {
             Ok(r) => r,
             Err(e) => {
@@ -500,26 +527,16 @@ pub async fn serve_proxy(
         };
 
         if let Err(e) = client_stream.write_all(&resp_bytes).await {
-            error!(
-                target: "migux::proxy",
-                error = ?e,
-                "Error writing proxied response back to client"
-            );
+            error!(target: "migux::proxy", error=?e, "Error writing proxied response back to client");
             last_err = Some(e.into());
-            // Even if the client write fails, the upstream connection may still be valid,
-            // but to keep logic simple we do not return it to the pool in this case.
             continue;
         }
 
         if let Err(e) = client_stream.flush().await {
-            warn!(
-                target: "migux::proxy",
-                error = ?e,
-                "Error flushing response to client"
-            );
+            warn!(target: "migux::proxy", error=?e, "Error flushing response to client");
         }
 
-        // Success: if upstream supports keep-alive, return connection to pool
+        // If reusable, put it back in pool
         if reusable {
             checkin_upstream_stream(upstream_addr, upstream_stream);
         }
@@ -527,12 +544,11 @@ pub async fn serve_proxy(
         return Ok(());
     }
 
-    // All upstreams failed → 502 Bad Gateway
     error!(
         target: "migux::proxy",
         upstream = %upstream_name,
         error = ?last_err,
-        "All upstreams failed; returning 502 Bad Gateway"
+        "All upstreams failed; returning 502"
     );
     send_502(client_stream).await?;
     Ok(())

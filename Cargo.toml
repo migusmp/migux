@@ -16,6 +16,7 @@ members = [
     # -----------------------------------------
     # WORKSPACE CRATES (SERVER LOGIC)
     # -----------------------------------------
+    "crates/migux_cache",
 
     "crates/migux_core",           # CORE:
                              # Base types, global errors, constants,
@@ -54,7 +55,7 @@ members = [
                              # - Streams request/response bodies
                              # - Handles keep-alive, buffering and timeouts
 
-    "crates/utils",          # UTILS:
+    "crates/utils", "crates/migux_cache",          # UTILS:
                              # Utility functions:
                              # - I/O helpers
                              # - Path helpers
