@@ -219,8 +219,12 @@ impl MiguxConfig {
         let def_global = GlobalConfig::default();
 
         if self.http.cache_dir.is_some() {
-            self.http.cache_default_ttl_secs = Some(30);
-            self.http.cache_max_object_bytes = Some(1048576);
+            if self.http.cache_default_ttl_secs.is_none() {
+                self.http.cache_default_ttl_secs = Some(30);
+            }
+            if self.http.cache_max_object_bytes.is_none() {
+                self.http.cache_max_object_bytes = Some(1048576);
+            }
         }
 
         if self.global.worker_processes == 0 {

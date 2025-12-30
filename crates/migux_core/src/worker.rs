@@ -1,6 +1,5 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use migux_cache::manager::CacheManager;
 use migux_http::responses::send_404;
 use migux_proxy::serve_proxy;
 use migux_static::serve_static;
@@ -27,7 +26,6 @@ pub async fn handle_connection(
     client_addr: SocketAddr,
     servers: Arc<Vec<ServerRuntime>>,
     cfg: Arc<MiguxConfig>,
-    cache: Arc<CacheManager>,
 ) -> anyhow::Result<()> {
     info!(target: "migux::worker", "Handling new client connection");
 
@@ -97,6 +95,9 @@ pub async fn handle_connection(
                 "Serving static file"
             );
 
+            // ✅ Cache según location.cache (y solo GET cachea)
+            // serve_static_cached(&mut stream, &server.config, location, &method, path, &cache)
+            //     .await?;
             serve_static(&mut stream, &server.config, location, path).await?;
         }
 

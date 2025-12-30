@@ -8,7 +8,6 @@ migux_config = { path="../migux_config" }
 migux_http = { path="../migux_http" }
 migux_proxy = { path="../migux_proxy" }
 migux_static = { path="../migux_static" }
-migux_cache = { path="../migux_cache" }
 
 dashmap = { workspace = true }
 anyhow = { workspace = true }

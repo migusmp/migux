@@ -11,3 +11,5 @@ migux_config = { path = "../migux_config" }
 tokio = { workspace = true }
 mime_guess = { workspace = true }
 anyhow = { workspace = true }
+http = { workspace = true }
+tracing = { workspace = true }

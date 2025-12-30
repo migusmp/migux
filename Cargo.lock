@@ -461,13 +461,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "migux_cache"
-version = "0.1.0"
-dependencies = [
- "http",
-]
-
-[[package]]
 name = "migux_config"
 version = "0.1.0"
 dependencies = [
@@ -481,7 +474,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
- "migux_cache",
  "migux_config",
  "migux_http",
  "migux_proxy",
@@ -524,11 +516,13 @@ name = "migux_static"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "http",
  "migux_config",
  "migux_http",
  "migux_proxy",
  "mime_guess",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
