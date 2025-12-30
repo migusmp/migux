@@ -106,18 +106,13 @@ impl Default for ServerConfig {
 // =======================================================
 // LOCATION TYPE (enum tipado)
 // =======================================================
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub enum LocationType {
+    #[default]
     #[serde(rename = "static")]
     Static,
     #[serde(rename = "proxy")]
     Proxy,
-}
-
-impl Default for LocationType {
-    fn default() -> Self {
-        LocationType::Static
-    }
 }
 
 // =======================================================
@@ -189,10 +184,8 @@ impl Default for MiguxConfig {
 impl MiguxConfig {
     pub fn from_file(file_name: &str) -> Result<Self, config::ConfigError> {
         let built = config::Config::builder()
-            .add_source(
-                config::File::new(file_name, config::FileFormat::Ini).required(false), // si no existe, no peta
-            )
-            .build()?; // Propaga error de build
+            .add_source(config::File::new(file_name, config::FileFormat::Ini).required(false))
+            .build()?;
 
         let mut cfg: MiguxConfig = built.try_deserialize()?;
 
@@ -234,15 +227,11 @@ impl MiguxConfig {
         if self.http.access_log.is_empty() {
             self.http.access_log = def_http.access_log.clone();
         }
-        // (Opcional) si quieres evitar keepalive = 0:
-        // if self.http.keepalive_timeout_secs == 0 {
-        //     self.http.keepalive_timeout_secs = def_http.keepalive_timeout_secs;
-        // }
 
         // SERVERS
         let def_server = ServerConfig::default();
 
-        for (_, s) in &mut self.servers {
+        for s in self.servers.values_mut() {
             if s.listen.is_empty() {
                 s.listen = def_server.listen.clone();
             }
@@ -258,27 +247,39 @@ impl MiguxConfig {
         }
 
         // LOCATIONS
-        for (_, l) in &mut self.location {
-            // Default root = root del server al que pertenece
-            if l.root.is_none() {
-                if let Some(srv) = self.servers.get(&l.server) {
-                    l.root = Some(srv.root.clone());
-                }
+        for l in self.location.values_mut() {
+            if l.root.is_none()
+                && let Some(srv) = self.servers.get(&l.server)
+            {
+                l.root = Some(srv.root.clone());
             }
 
-            // Default index = index del server
-            if l.index.is_none() {
-                if let Some(srv) = self.servers.get(&l.server) {
-                    l.index = Some(srv.index.clone());
-                }
+            if l.index.is_none()
+                && let Some(srv) = self.servers.get(&l.server)
+            {
+                l.index = Some(srv.index.clone());
             }
-
-            // Si el tipo es Proxy, idealmente upstream debería ser Some(...)
-            // Aquí podrías loggear un warning si falta.
-            // if matches!(l.r#type, LocationType::Proxy) && l.upstream.is_none() {
-            //     eprintln!("⚠️  Location '{}' es proxy pero no tiene upstream", l.path);
-            // }
         }
+
+        // // Default root = root del server al que pertenece
+        // if self.location.get(l).root.is_none() {
+        //     if let Some(srv) = self.servers.get(&l.server) {
+        //         l.root = Some(srv.root.clone());
+        //     }
+        // }
+
+        // Default index = index del server
+        // if l.index.is_none() {
+        //     if let Some(srv) = self.servers.get(&l.server) {
+        //         l.index = Some(srv.index.clone());
+        //     }
+        // }
+
+        // Si el tipo es Proxy, idealmente upstream debería ser Some(...)
+        // Aquí podrías loggear un warning si falta.
+        // if matches!(l.r#type, LocationType::Proxy) && l.upstream.is_none() {
+        //     eprintln!("⚠️  Location '{}' es proxy pero no tiene upstream", l.path);
+        // }
     }
 
     // opcional: para ver qué se ha cargado
