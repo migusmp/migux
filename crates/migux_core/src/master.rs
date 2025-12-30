@@ -11,8 +11,8 @@ pub struct CacheStore {
     pub responses: DashMap<String, Vec<u8>>,
 }
 
-impl CacheStore {
-    pub fn new() -> Self {
+impl Default for CacheStore {
+    fn default() -> Self {
         Self {
             responses: DashMap::new(),
         }
@@ -34,7 +34,7 @@ impl Master {
         Self {
             cfg,
             servers_by_listen,
-            cache: CacheStore::new(),
+            cache: CacheStore::default(),
         }
     }
 
@@ -57,6 +57,8 @@ impl Master {
 
         // Global limit for concurrent connections across the entire process
         let max_conns = self.cfg.global.worker_connections as usize;
+
+        // We initialize the semaphore with the maximum number of configured connections
         let semaphore = Arc::new(Semaphore::new(max_conns));
 
         let cfg = self.cfg.clone();
@@ -179,6 +181,8 @@ async fn accept_loop(
 
         // Acquire a permit (global connection limit)
         let sem_for_permit = semaphore.clone();
+
+        // Permits must be acquired via Semaphore::acquire_owned to be movable across the task boundary
         let permit = match sem_for_permit.acquire_owned().await {
             Ok(p) => p,
             Err(e) => {
@@ -192,6 +196,7 @@ async fn accept_loop(
             }
         };
 
+        // Returns the current number of available permits
         let in_flight = semaphore.available_permits();
 
         debug!(

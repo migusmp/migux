@@ -260,26 +260,6 @@ impl MiguxConfig {
                 l.index = Some(srv.index.clone());
             }
         }
-
-        // // Default root = root del server al que pertenece
-        // if self.location.get(l).root.is_none() {
-        //     if let Some(srv) = self.servers.get(&l.server) {
-        //         l.root = Some(srv.root.clone());
-        //     }
-        // }
-
-        // Default index = index del server
-        // if l.index.is_none() {
-        //     if let Some(srv) = self.servers.get(&l.server) {
-        //         l.index = Some(srv.index.clone());
-        //     }
-        // }
-
-        // Si el tipo es Proxy, idealmente upstream debería ser Some(...)
-        // Aquí podrías loggear un warning si falta.
-        // if matches!(l.r#type, LocationType::Proxy) && l.upstream.is_none() {
-        //     eprintln!("⚠️  Location '{}' es proxy pero no tiene upstream", l.path);
-        // }
     }
 
     // opcional: para ver qué se ha cargado

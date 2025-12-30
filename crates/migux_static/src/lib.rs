@@ -1,4 +1,5 @@
 use migux_http::responses::{send_404, send_500, send_response};
+use mime_guess::mime;
 use tokio::{fs, net::TcpStream};
 
 use migux_config::{LocationConfig, ServerConfig};
@@ -16,6 +17,7 @@ pub async fn serve_static(
     // Resolver path relativo dentro de `root`
     let rel = resolve_relative_path(req_path, &location.path, index);
 
+    // Si la ruta del archivo estatico no existe, retorna un código 404
     if rel.is_none() {
         // no matchea realmente esa location
         send_404(stream).await?;
@@ -28,8 +30,21 @@ pub async fn serve_static(
 
     match fs::read(&file_path).await {
         Ok(body) => {
-            // (opcional) en el futuro, usar mime_guess aquí
-            send_response(stream, "200 OK", "text/html; charset=utf-8", &body).await?;
+            // Guess the MIME type based on the file extension
+            // (e.g. .html -> text/html, .css -> text/css, .png -> image/png)
+            let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
+
+            // Build the Content-Type header
+            // - For text-based files, explicitly add UTF-8 charset
+            // - For binary files (images, videos, etc.), do not add charset
+            let content_type = if mime.type_() == mime::TEXT {
+                format!("{}; charset=utf-8", mime.essence_str())
+            } else {
+                mime.essence_str().to_string()
+            };
+
+            // Send a 200 OK response with the correct Content-Type
+            send_response(stream, "200 OK", &content_type, &body).await?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("[worker] file not found {}: {:?}", file_path, e);

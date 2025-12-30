@@ -9,6 +9,7 @@ pub async fn send_response(
 ) -> anyhow::Result<()> {
     let response = format!(
         "HTTP/1.1 {status}\r\n\
+         Server: migux/0.1.0\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\
@@ -60,25 +61,3 @@ pub async fn send_502(stream: &mut TcpStream) -> anyhow::Result<()> {
 pub async fn send_405(stream: &mut TcpStream) -> anyhow::Result<()> {
     send_text_response(stream, "405 Method Not Allowed", "405 Method Not Allowed\n").await
 }
-
-// (DEPRECATED) servir index usando la misma lógica genérica.
-// pub async fn serve_index(stream: &mut TcpStream, server: &ServerRuntime) -> anyhow::Result<()> {
-//     let file_path = format!("{}/{}", server.config.root, server.config.index);
-//     println!("[worker] serving file: {}", file_path);
-//
-//     match fs::read(&file_path).await {
-//         Ok(body) => {
-//             send_response(stream, "200 OK", "text/html; charset=utf-8", &body).await?;
-//         }
-//         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-//             eprintln!("[worker] index not found {}: {:?}", file_path, e);
-//             send_404(stream).await?;
-//         }
-//         Err(e) => {
-//             eprintln!("[worker] error reading {}: {:?}", file_path, e);
-//             send_500(stream).await?;
-//         }
-//     }
-//
-//     Ok(())
-// }
