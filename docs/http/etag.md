@@ -2,9 +2,9 @@
 # Generate ETags (Entity Tag) Process
 
 ## Resources
-- `https://developer.mozilla.org/es/docs/Web/HTTP/Reference/Headers/ETag`
-- `https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/If-None-Match`
-- `https://developer.mozilla.org/es/docs/Web/HTTP/Guides/Conditional_requests`
+- [MDN: ETag](https://developer.mozilla.org/es/docs/Web/HTTP/Reference/Headers/ETag)
+- [MDN: If-None-Match](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/If-None-Match)
+- [MDN: Conditional requests](https://developer.mozilla.org/es/docs/Web/HTTP/Guides/Conditional_requests)
 
 ## Full HTTP flow
 
