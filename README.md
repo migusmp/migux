@@ -26,7 +26,7 @@ By default it loads `migux.conf` from the current working directory.
 4) Match location by longest prefix.
 5) Dispatch to static or proxy handler.
 
-Note: only one request per client connection is handled (client keep-alive is not implemented).
+Client keep-alive is supported (multiple requests per connection).
 
 ## Configuration (`migux.conf`)
 
@@ -70,6 +70,8 @@ type = "static"
 - `sendfile` (bool)
 - `keepalive_timeout_secs` (u64)
 - `access_log` (string path)
+
+`keepalive_timeout_secs` controls idle timeout between requests on the same client connection.
 
 Timeouts:
 - `client_read_timeout_secs`
@@ -142,7 +144,7 @@ Helpers exist for: 404, 405, 408, 413, 431, 500, 502, 501.
 
 ## Limitations / TODO
 
-- Client keep-alive not implemented (one request per connection).
+- Chunked request bodies from client are not supported (Content-Length only).
 - HTTP/2 not supported.
 - `strip_prefix` config is parsed but not used yet (uses `location.path`).
 - Cache config is not wired yet.

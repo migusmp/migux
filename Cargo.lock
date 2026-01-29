@@ -473,6 +473,7 @@ name = "migux_core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap",
  "migux_config",
  "migux_http",
