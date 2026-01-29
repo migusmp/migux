@@ -32,6 +32,32 @@ Note: only one request per client connection is handled (client keep-alive is no
 
 Format is INI-like using sections.
 
+### Minimal working example config
+
+Save this as `migux.conf`:
+
+```ini
+[global]
+worker_processes = 1
+worker_connections = 256
+log_level = "info"
+
+[http]
+sendfile = true
+keepalive_timeout_secs = 65
+
+[server.main]
+listen = "0.0.0.0:8080"
+server_name = "localhost"
+root = "./public"
+index = "index.html"
+
+[location.main_root]
+server = "main"
+path = "/"
+type = "static"
+```
+
 ### [global]
 
 - `worker_processes` (u8)
