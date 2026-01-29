@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, sync::atomic::AtomicUsize, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::atomic::AtomicUsize,
+    sync::Arc,
+    time::Instant,
+};
 
 use bytes::{Buf, BytesMut};
 use dashmap::DashMap;
@@ -37,6 +42,7 @@ pub struct Proxy {
 pub(super) struct PooledStream {
     stream: TcpStream,
     read_buf: BytesMut,
+    last_used: Instant,
 }
 
 impl PooledStream {
@@ -44,6 +50,7 @@ impl PooledStream {
         Self {
             stream,
             read_buf: BytesMut::new(),
+            last_used: Instant::now(),
         }
     }
 }
@@ -73,13 +80,18 @@ impl Proxy {
         &self,
         addr: &str,
         connect_timeout: Duration,
+        idle_ttl: Duration,
     ) -> anyhow::Result<PooledStream> {
         // Intenta sacar uno del pool
         if let Some(mut entry) = self.pools.get_mut(addr)
-            && let Some(pooled) = entry.pop()
         {
-            debug!(target: "migux::proxy", upstream = %addr, "Reusing pooled upstream connection");
-            return Ok(pooled);
+            while let Some(pooled) = entry.pop() {
+                if idle_ttl.is_zero() || pooled.last_used.elapsed() <= idle_ttl {
+                    debug!(target: "migux::proxy", upstream = %addr, "Reusing pooled upstream connection");
+                    return Ok(pooled);
+                }
+                debug!(target: "migux::proxy", upstream = %addr, "Dropping idle pooled connection");
+            }
         }
 
         info!(target: "migux::proxy", upstream = %addr, "Creating new upstream connection");
@@ -90,11 +102,14 @@ impl Proxy {
     /// Returns an upstream connection back to the pool so it can be reused.
     ///
     /// Solo se llama si el streamer decide que la conexion es reusable.
-    fn checkin_upstream_stream(&self, addr: &str, pooled: PooledStream) {
-        self.pools
-            .entry(addr.to_string())
-            .or_insert_with(Vec::new)
-            .push(pooled);
+    fn checkin_upstream_stream(&self, addr: &str, mut pooled: PooledStream, max_pool: usize) {
+        pooled.last_used = Instant::now();
+        let mut entry = self.pools.entry(addr.to_string()).or_insert_with(Vec::new);
+        if entry.len() >= max_pool {
+            debug!(target: "migux::proxy", upstream = %addr, "Pool full; dropping connection");
+            return;
+        }
+        entry.push(pooled);
 
         debug!(target: "migux::proxy", upstream = %addr, "Returned upstream connection to pool");
     }
@@ -147,6 +162,8 @@ impl Proxy {
         )?;
         let client_ip = client_addr.ip().to_string();
         let connect_timeout = Duration::from_secs(cfg.http.proxy_connect_timeout_secs);
+        let idle_ttl = Duration::from_secs(cfg.http.proxy_pool_idle_timeout_secs);
+        let max_pool = cfg.http.proxy_pool_max_per_addr;
         let write_timeout = Duration::from_secs(cfg.http.proxy_write_timeout_secs);
         let read_timeout = Duration::from_secs(cfg.http.proxy_read_timeout_secs);
         let client_read_timeout = Duration::from_secs(cfg.http.client_read_timeout_secs);
@@ -189,8 +206,10 @@ impl Proxy {
         // 8) intentar cada upstream (primero elegido por rr, luego fallback)
         for upstream_addr in &candidate_addrs {
             // 8.1) sacar del pool o conectar
-            let mut upstream_stream =
-                match self.checkout_upstream_stream(upstream_addr, connect_timeout).await {
+            let mut upstream_stream = match self
+                .checkout_upstream_stream(upstream_addr, connect_timeout, idle_ttl)
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     error!(target: "migux::proxy", upstream=%upstream_addr, error=?e, "Failed to get upstream connection");
@@ -354,7 +373,7 @@ impl Proxy {
 
             // 8.5) si reusable, devolver socket al pool
             if reusable {
-                self.checkin_upstream_stream(upstream_addr, upstream_stream);
+                self.checkin_upstream_stream(upstream_addr, upstream_stream, max_pool);
             }
 
             // exito: ya hemos respondido al cliente

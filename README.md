@@ -86,6 +86,10 @@ Limits (bytes):
 - `max_upstream_response_headers_bytes`
 - `max_upstream_response_body_bytes`
 
+Upstream pool:
+- `proxy_pool_max_per_addr`
+- `proxy_pool_idle_timeout_secs`
+
 Cache fields (defined but not wired yet):
 - `cache_dir`
 - `cache_default_ttl_secs`

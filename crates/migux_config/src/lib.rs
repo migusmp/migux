@@ -40,6 +40,10 @@ pub struct HttpConfig {
     pub proxy_read_timeout_secs: u64,
     pub proxy_write_timeout_secs: u64,
 
+    // Upstream pool limits
+    pub proxy_pool_max_per_addr: usize,
+    pub proxy_pool_idle_timeout_secs: u64,
+
     // Limits (bytes)
     pub max_request_headers_bytes: u64,
     pub max_request_body_bytes: u64,
@@ -62,6 +66,8 @@ impl Default for HttpConfig {
             proxy_connect_timeout_secs: 5,
             proxy_read_timeout_secs: 30,
             proxy_write_timeout_secs: 30,
+            proxy_pool_max_per_addr: 32,
+            proxy_pool_idle_timeout_secs: 60,
             max_request_headers_bytes: 64 * 1024,
             max_request_body_bytes: 10 * 1024 * 1024,
             max_upstream_response_headers_bytes: 64 * 1024,
@@ -280,6 +286,12 @@ impl MiguxConfig {
         if self.http.proxy_write_timeout_secs == 0 {
             self.http.proxy_write_timeout_secs = def_http.proxy_write_timeout_secs;
         }
+        if self.http.proxy_pool_max_per_addr == 0 {
+            self.http.proxy_pool_max_per_addr = def_http.proxy_pool_max_per_addr;
+        }
+        if self.http.proxy_pool_idle_timeout_secs == 0 {
+            self.http.proxy_pool_idle_timeout_secs = def_http.proxy_pool_idle_timeout_secs;
+        }
         if self.http.max_request_headers_bytes == 0 {
             self.http.max_request_headers_bytes = def_http.max_request_headers_bytes;
         }
@@ -362,6 +374,14 @@ impl MiguxConfig {
         println!(
             "  proxy_write_timeout_secs = {}",
             self.http.proxy_write_timeout_secs
+        );
+        println!(
+            "  proxy_pool_max_per_addr = {}",
+            self.http.proxy_pool_max_per_addr
+        );
+        println!(
+            "  proxy_pool_idle_timeout_secs = {}",
+            self.http.proxy_pool_idle_timeout_secs
         );
         println!(
             "  max_request_headers_bytes = {}",
