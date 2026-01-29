@@ -140,6 +140,8 @@ cert_path = "/etc/migux/certs/fullchain.pem"
 key_path = "/etc/migux/certs/privkey.pem"
 # Redirect HTTP -> HTTPS.
 redirect_http = true
+# Enable HTTP/2 via ALPN.
+http2 = true
 
 # -------- locations --------
 [location.main_root]
@@ -198,6 +200,13 @@ listen = "0.0.0.0:8443"
 cert_path = "/etc/migux/certs/fullchain.pem"
 key_path = "/etc/migux/certs/privkey.pem"
 redirect_http = true
+http2 = true
+```
+
+Test HTTP/2 (requires TLS):
+
+```bash
+curl --http2 -k https://localhost:8443/
 ```
 
 ## Static file server
@@ -212,6 +221,6 @@ Helpers exist for: 404, 405, 408, 413, 431, 500, 502, 501.
 
 ## Limitations / TODO
 
-- HTTP/2 not supported.
+- HTTP/2 is supported only over TLS (ALPN). Cleartext h2c is not supported.
 - `strip_prefix` config is parsed but not used yet (uses `location.path`).
 - Cache config is not wired yet.

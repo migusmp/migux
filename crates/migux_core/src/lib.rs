@@ -8,6 +8,7 @@ pub mod master;
 pub mod structs;
 pub mod types;
 pub mod worker;
+pub mod http2;
 
 pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
     let mut map: ServersByListen = HashMap::new();

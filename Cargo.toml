@@ -97,6 +97,10 @@ hyper = { version = "1", features = ["full"] }
 # Handles connections, headers, HTTP/1.1 + HTTP/2, etc.
 
 http = "1"
+# Helpers for building/consuming HTTP bodies with hyper 1.x.
+http-body-util = "0.1"
+# Tokio adapters + executor for hyper 1.x.
+hyper-util = { version = "0.1", features = ["tokio"] }
 # Pure HTTP types (Request, Response, Method, HeaderMap, etc.)
 # No runtime. Used internally by Hyper and great for your `http` crate.
 

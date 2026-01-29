@@ -173,6 +173,7 @@ pub struct TlsConfig {
     pub cert_path: String,
     pub key_path: String,
     pub redirect_http: bool,
+    pub http2: bool,
 }
 
 impl Default for TlsConfig {
@@ -182,6 +183,7 @@ impl Default for TlsConfig {
             cert_path: String::new(),
             key_path: String::new(),
             redirect_http: false,
+            http2: false,
         }
     }
 }
@@ -482,6 +484,7 @@ impl MiguxConfig {
                 println!("    tls.cert_path     = {}", tls.cert_path);
                 println!("    tls.key_path      = {}", tls.key_path);
                 println!("    tls.redirect_http = {}", tls.redirect_http);
+                println!("    tls.http2         = {}", tls.http2);
             }
         }
 

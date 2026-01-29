@@ -9,6 +9,7 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::{
     build_servers_by_listen,
     build_tls_servers_by_listen,
+    http2::serve_h2_connection,
     worker::handle_connection,
     ServerRuntime,
     ServersByListen,
@@ -456,7 +457,40 @@ async fn accept_loop_tls(
                 }
             };
 
-            if let Err(e) = handle_connection(
+            let alpn = tls_stream
+                .get_ref()
+                .1
+                .alpn_protocol()
+                .map(|v| v.to_vec());
+
+            let servers_h2 = servers_clone.clone();
+            let proxy_h2 = proxy_clone.clone();
+            let cfg_h2 = cfg_clone.clone();
+
+            if matches!(alpn.as_deref(), Some(b"h2")) {
+                if let Err(e) = serve_h2_connection(
+                    tls_stream,
+                    addr,
+                    servers_h2,
+                    proxy_h2,
+                    cfg_h2,
+                )
+                .await
+                {
+                    error!(
+                        target: "migux::worker",
+                        client_addr = %addr,
+                        error = ?e,
+                        "Error while handling HTTP/2 TLS connection"
+                    );
+                } else {
+                    debug!(
+                        target: "migux::worker",
+                        client_addr = %addr,
+                        "HTTP/2 TLS connection handled successfully"
+                    );
+                }
+            } else if let Err(e) = handle_connection(
                 Box::new(tls_stream),
                 addr,
                 servers_clone,
@@ -492,7 +526,11 @@ fn load_tls_acceptor(cfg: &TlsConfig) -> anyhow::Result<TlsAcceptor> {
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("Invalid TLS config: {e}"))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    if cfg.http2 {
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    } else {
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    }
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }

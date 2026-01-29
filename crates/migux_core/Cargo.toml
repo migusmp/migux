@@ -16,3 +16,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+httparse = { workspace = true }
