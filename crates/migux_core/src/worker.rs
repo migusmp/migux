@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use bytes::{Buf, BytesMut};
 use migux_http::responses::{send_400, send_404, send_408, send_413, send_431, send_redirect};
 use migux_proxy::Proxy;
-use migux_static::serve_static;
+use migux_static::serve_static_cached;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     time::{timeout, Duration},
@@ -138,10 +138,15 @@ pub async fn handle_connection(
                     "Serving static file"
                 );
 
-                // ✅ Cache según location.cache (y solo GET cachea)
-                // serve_static_cached(&mut stream, &server.config, location, &method, path, &cache)
-                //     .await?;
-                serve_static(&mut stream, &server.config, location, path).await?;
+                serve_static_cached(
+                    &mut stream,
+                    &cfg.http,
+                    &server.config,
+                    location,
+                    method,
+                    path,
+                )
+                .await?;
                 close_after = true;
 
                 // Discard request body (if any) so keep-alive doesn't break.

@@ -100,7 +100,7 @@ max_upstream_response_body_bytes = 10485760
 proxy_pool_max_per_addr = 16
 proxy_pool_idle_timeout_secs = 60
 
-# Cache fields (defined but not wired yet).
+# Static cache settings (used for GET on static locations).
 cache_dir = "/var/cache/migux"
 cache_default_ttl_secs = 30
 cache_max_object_bytes = 1048576
@@ -162,7 +162,7 @@ type = "proxy"
 upstream = "app"
 # Parsed but not used yet.
 strip_prefix = "/api"
-# Parsed but not used yet.
+# Enable/disable static cache for this location.
 cache = false
 ```
 
@@ -223,4 +223,4 @@ Helpers exist for: 404, 405, 408, 413, 431, 500, 502, 501.
 
 - HTTP/2 is supported only over TLS (ALPN). Cleartext h2c is not supported.
 - `strip_prefix` config is parsed but not used yet (uses `location.path`).
-- Cache config is not wired yet.
+- Cache config is wired for static GETs only (proxy/cache not wired yet).
