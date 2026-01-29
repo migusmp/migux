@@ -24,6 +24,24 @@ impl Default for GlobalConfig {
     }
 }
 
+impl GlobalConfig {
+    pub fn worker_processes(&self) -> u8 {
+        self.worker_processes
+    }
+
+    pub fn worker_connections(&self) -> u16 {
+        self.worker_connections
+    }
+
+    pub fn log_level(&self) -> &str {
+        &self.log_level
+    }
+
+    pub fn error_log(&self) -> &str {
+        &self.error_log
+    }
+}
+
 // =======================================================
 // HTTP CONFIG + DEFAULTS
 // =======================================================
@@ -82,6 +100,72 @@ impl Default for HttpConfig {
     }
 }
 
+impl HttpConfig {
+    pub fn sendfile(&self) -> bool {
+        self.sendfile
+    }
+
+    pub fn keepalive_timeout_secs(&self) -> u64 {
+        self.keepalive_timeout_secs
+    }
+
+    pub fn access_log(&self) -> &str {
+        &self.access_log
+    }
+
+    pub fn client_read_timeout_secs(&self) -> u64 {
+        self.client_read_timeout_secs
+    }
+
+    pub fn proxy_connect_timeout_secs(&self) -> u64 {
+        self.proxy_connect_timeout_secs
+    }
+
+    pub fn proxy_read_timeout_secs(&self) -> u64 {
+        self.proxy_read_timeout_secs
+    }
+
+    pub fn proxy_write_timeout_secs(&self) -> u64 {
+        self.proxy_write_timeout_secs
+    }
+
+    pub fn proxy_pool_max_per_addr(&self) -> usize {
+        self.proxy_pool_max_per_addr
+    }
+
+    pub fn proxy_pool_idle_timeout_secs(&self) -> u64 {
+        self.proxy_pool_idle_timeout_secs
+    }
+
+    pub fn max_request_headers_bytes(&self) -> u64 {
+        self.max_request_headers_bytes
+    }
+
+    pub fn max_request_body_bytes(&self) -> u64 {
+        self.max_request_body_bytes
+    }
+
+    pub fn max_upstream_response_headers_bytes(&self) -> u64 {
+        self.max_upstream_response_headers_bytes
+    }
+
+    pub fn max_upstream_response_body_bytes(&self) -> u64 {
+        self.max_upstream_response_body_bytes
+    }
+
+    pub fn cache_dir(&self) -> Option<&str> {
+        self.cache_dir.as_deref()
+    }
+
+    pub fn cache_default_ttl_secs(&self) -> Option<u32> {
+        self.cache_default_ttl_secs
+    }
+
+    pub fn cache_max_object_bytes(&self) -> Option<u64> {
+        self.cache_max_object_bytes
+    }
+}
+
 // =======================================================
 // UPSTREAM CONFIG + DEFAULTS
 // =======================================================
@@ -110,6 +194,20 @@ impl Default for UpstreamConfig {
     }
 }
 
+impl UpstreamConfig {
+    pub fn server(&self) -> &UpstreamServers {
+        &self.server
+    }
+
+    pub fn strategy(&self) -> Option<&str> {
+        self.strategy.as_deref()
+    }
+
+    pub fn health(&self) -> &UpstreamHealthConfig {
+        &self.health
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 /// Health/circuit-breaker configuration for an upstream pool.
@@ -135,6 +233,28 @@ impl Default for UpstreamHealthConfig {
             interval_secs: 10,
             timeout_secs: 1,
         }
+    }
+}
+
+impl UpstreamHealthConfig {
+    pub fn fail_threshold(&self) -> u32 {
+        self.fail_threshold
+    }
+
+    pub fn cooldown_secs(&self) -> u64 {
+        self.cooldown_secs
+    }
+
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
+    pub fn interval_secs(&self) -> u64 {
+        self.interval_secs
+    }
+
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
     }
 }
 
@@ -172,6 +292,28 @@ impl Default for ServerConfig {
     }
 }
 
+impl ServerConfig {
+    pub fn listen(&self) -> &str {
+        &self.listen
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    pub fn index(&self) -> &str {
+        &self.index
+    }
+
+    pub fn tls(&self) -> Option<&TlsConfig> {
+        self.tls.as_ref()
+    }
+}
+
 // =======================================================
 // TLS CONFIG
 // =======================================================
@@ -200,6 +342,28 @@ impl Default for TlsConfig {
             redirect_http: false,
             http2: false,
         }
+    }
+}
+
+impl TlsConfig {
+    pub fn listen(&self) -> &str {
+        &self.listen
+    }
+
+    pub fn cert_path(&self) -> &str {
+        &self.cert_path
+    }
+
+    pub fn key_path(&self) -> &str {
+        &self.key_path
+    }
+
+    pub fn redirect_http(&self) -> bool {
+        self.redirect_http
+    }
+
+    pub fn http2(&self) -> bool {
+        self.http2
     }
 }
 
@@ -246,6 +410,48 @@ impl Default for LocationConfig {
     }
 }
 
+impl LocationConfig {
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn location_type(&self) -> &LocationType {
+        &self.r#type
+    }
+
+    pub fn root(&self) -> Option<&str> {
+        self.root.as_deref()
+    }
+
+    pub fn root_or<'a>(&'a self, default: &'a str) -> &'a str {
+        self.root.as_deref().unwrap_or(default)
+    }
+
+    pub fn index(&self) -> Option<&str> {
+        self.index.as_deref()
+    }
+
+    pub fn index_or<'a>(&'a self, default: &'a str) -> &'a str {
+        self.index.as_deref().unwrap_or(default)
+    }
+
+    pub fn upstream(&self) -> Option<&str> {
+        self.upstream.as_deref()
+    }
+
+    pub fn strip_prefix(&self) -> Option<&str> {
+        self.strip_prefix.as_deref()
+    }
+
+    pub fn cache(&self) -> Option<bool> {
+        self.cache
+    }
+}
+
 // =======================================================
 // MIGUX CONFIG — main config
 // =======================================================
@@ -283,6 +489,38 @@ impl Default for MiguxConfig {
 }
 
 impl MiguxConfig {
+    pub fn global(&self) -> &GlobalConfig {
+        &self.global
+    }
+
+    pub fn http(&self) -> &HttpConfig {
+        &self.http
+    }
+
+    pub fn upstreams(&self) -> &HashMap<String, UpstreamConfig> {
+        &self.upstream
+    }
+
+    pub fn upstream(&self, name: &str) -> Option<&UpstreamConfig> {
+        self.upstream.get(name)
+    }
+
+    pub fn servers(&self) -> &HashMap<String, ServerConfig> {
+        &self.servers
+    }
+
+    pub fn server(&self, name: &str) -> Option<&ServerConfig> {
+        self.servers.get(name)
+    }
+
+    pub fn locations(&self) -> &HashMap<String, LocationConfig> {
+        &self.location
+    }
+
+    pub fn location(&self, name: &str) -> Option<&LocationConfig> {
+        self.location.get(name)
+    }
+
     pub fn from_file(file_name: &str) -> Result<Self, config::ConfigError> {
         let built = config::Config::builder()
             .add_source(config::File::new(file_name, config::FileFormat::Ini).required(false))
