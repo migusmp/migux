@@ -213,7 +213,7 @@ curl --http2 -k https://localhost:8443/
 
 - Resolves files based on `root` and `index`.
 - Uses MIME type detection.
-- Uses `Connection: keep-alive` when the client allows it (HTTP/1.1).
+ - Respects HTTP/1 keep-alive (`Connection: keep-alive` / `close`).
 - Disk-backed cache (optional): stores `.cache` and `.meta` files under `cache_dir` and also keeps a memory copy for hot hits.
 
 ## Error responses
