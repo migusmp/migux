@@ -27,6 +27,7 @@ By default it loads `migux.conf` from the current working directory.
 5) Dispatch to static or proxy handler.
 
 Client keep-alive is supported (multiple requests per connection).
+Client requests support `Content-Length` and `Transfer-Encoding: chunked`.
 
 ## Configuration (`migux.conf`)
 
@@ -144,7 +145,6 @@ Helpers exist for: 404, 405, 408, 413, 431, 500, 502, 501.
 
 ## Limitations / TODO
 
-- Chunked request bodies from client are not supported (Content-Length only).
 - HTTP/2 not supported.
 - `strip_prefix` config is parsed but not used yet (uses `location.path`).
 - Cache config is not wired yet.

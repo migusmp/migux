@@ -62,6 +62,10 @@ pub async fn send_405(stream: &mut TcpStream) -> anyhow::Result<()> {
     send_text_response(stream, "405 Method Not Allowed", "405 Method Not Allowed\n").await
 }
 
+pub async fn send_400(stream: &mut TcpStream) -> anyhow::Result<()> {
+    send_text_response(stream, "400 Bad Request", "400 Bad Request\n").await
+}
+
 pub async fn send_408(stream: &mut TcpStream) -> anyhow::Result<()> {
     send_text_response(stream, "408 Request Timeout", "408 Request Timeout\n").await
 }

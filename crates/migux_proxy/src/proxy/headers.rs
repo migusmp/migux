@@ -19,6 +19,7 @@ pub(super) fn rewrite_proxy_headers(
     req_headers: &str,
     client_ip: &str,
     keep_alive: bool,
+    body_len: usize,
 ) -> String {
     let mut lines = req_headers.lines();
     let _ = lines.next(); // request line (GET /... HTTP/1.1)
@@ -59,6 +60,7 @@ pub(super) fn rewrite_proxy_headers(
                 || name_trim.eq_ignore_ascii_case("trailer")
                 || name_trim.eq_ignore_ascii_case("transfer-encoding")
                 || name_trim.eq_ignore_ascii_case("upgrade")
+                || name_trim.eq_ignore_ascii_case("content-length")
             {
                 continue;
             }
@@ -78,6 +80,10 @@ pub(super) fn rewrite_proxy_headers(
 
     let connection_value = if keep_alive { "keep-alive" } else { "close" };
     headers.push(("Connection".to_string(), connection_value.to_string()));
+
+    if body_len > 0 {
+        headers.push(("Content-Length".to_string(), body_len.to_string()));
+    }
 
     // Serializa headers con CRLF
     let mut out = String::new();

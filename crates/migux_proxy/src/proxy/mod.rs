@@ -179,7 +179,8 @@ impl Proxy {
 
         // 6) reescribir headers para upstream
         let keep_alive = http_version != "HTTP/1.0";
-        let rest_of_headers = headers::rewrite_proxy_headers(req_headers, &client_ip, keep_alive);
+        let rest_of_headers =
+            headers::rewrite_proxy_headers(req_headers, &client_ip, keep_alive, req_body.len());
 
         // 7) construir request completa (start line + headers + blank line + body)
         let mut out = Vec::new();
