@@ -34,7 +34,7 @@ pub(super) async fn stream_http_response<S>(
     max_body: usize,
 ) -> anyhow::Result<bool>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + ?Sized,
 {
     let headers_end = read_response_headers(upstream, read_timeout, max_headers).await?;
     let headers_bytes = upstream.read_buf.split_to(headers_end + 4);
@@ -263,7 +263,7 @@ async fn stream_content_length<S>(
     read_timeout: Duration,
 ) -> anyhow::Result<bool>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + ?Sized,
 {
     while remaining > 0 {
         if upstream.read_buf.is_empty() {
@@ -294,7 +294,7 @@ async fn stream_until_eof<S>(
     max_body: usize,
 ) -> anyhow::Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + ?Sized,
 {
     let mut body_bytes = 0usize;
 
@@ -330,7 +330,7 @@ async fn stream_chunked_body<S>(
     max_body: usize,
 ) -> anyhow::Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + ?Sized,
 {
     let mut body_bytes = 0usize;
 
@@ -391,7 +391,7 @@ async fn read_exact_from_buf<S>(
     mut remaining: usize,
 ) -> anyhow::Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + ?Sized,
 {
     while remaining > 0 {
         if upstream.read_buf.is_empty() {

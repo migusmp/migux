@@ -18,28 +18,34 @@ use fs::resolve_relative_path;
 use response::{build_404, build_500, build_response_bytes};
 
 /// Serve a static file directly to the client stream.
-pub async fn serve_static(
-    stream: &mut (impl AsyncWrite + Unpin),
+pub async fn serve_static<S>(
+    stream: &mut S,
     server_cfg: &ServerConfig,
     location: &LocationConfig,
     req_path: &str,
     keep_alive: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin + ?Sized,
+{
     let resp = serve_static_bytes(server_cfg, location, req_path, keep_alive).await?;
     stream.write_all(&resp).await?;
     Ok(())
 }
 
 /// Serve a static file using cache when enabled.
-pub async fn serve_static_cached(
-    stream: &mut (impl AsyncWrite + Unpin),
+pub async fn serve_static_cached<S>(
+    stream: &mut S,
     http_cfg: &HttpConfig,
     server_cfg: &ServerConfig,
     location: &LocationConfig,
     method: &str,
     req_path: &str,
     keep_alive: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin + ?Sized,
+{
     if !cache_enabled(http_cfg, location, method) {
         return serve_static(stream, server_cfg, location, req_path, keep_alive).await;
     }

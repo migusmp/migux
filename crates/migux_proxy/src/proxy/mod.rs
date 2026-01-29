@@ -93,7 +93,7 @@ impl Proxy {
         client_addr: &SocketAddr,
     ) -> anyhow::Result<()>
     where
-        S: AsyncRead + AsyncWrite + Unpin + Send,
+        S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
     {
         // 1) localizar el upstream de la location
         let upstream_name = location
@@ -369,7 +369,7 @@ async fn stream_request_body<S>(
     max_body: usize,
 ) -> anyhow::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
     if is_chunked && content_length == 0 {
         stream_chunked_body(
@@ -409,7 +409,7 @@ async fn stream_chunked_body<S>(
     max_body: usize,
 ) -> anyhow::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
     let mut body_bytes = 0usize;
 
@@ -456,7 +456,7 @@ async fn read_line_bytes<S>(
     read_timeout: Duration,
 ) -> anyhow::Result<Vec<u8>>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncRead + Unpin + ?Sized,
 {
     loop {
         if let Some(end) = find_crlf(client_buf, 0) {
@@ -475,7 +475,7 @@ async fn stream_exact<S>(
     read_timeout: Duration,
 ) -> anyhow::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
     while remaining > 0 {
         if !client_buf.is_empty() {
@@ -513,7 +513,7 @@ async fn read_more_client<S>(
     read_timeout: Duration,
 ) -> anyhow::Result<()>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncRead + Unpin + ?Sized,
 {
     let mut tmp = [0u8; 4096];
     let n = match timeout(read_timeout, client_stream.read(&mut tmp)).await {
