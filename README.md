@@ -59,75 +59,108 @@ path = "/"
 type = "static"
 ```
 
-### [global]
+### Example config (migux.conf style)
 
-- `worker_processes` (u8)
-- `worker_connections` (u16)
-- `log_level` (string)
-- `error_log` (string path)
+```toml
+; -------- global --------
+[global]
+; Number of worker processes.
+worker_processes = 1
+; Max concurrent connections per worker.
+worker_connections = 1024
+; Log level: trace|debug|info|warn|error.
+log_level = "info"
+; Error log output path.
+error_log = "/var/log/migux/error.log"
 
-### [http]
+; -------- http --------
+[http]
+; Enable sendfile (if supported by platform).
+sendfile = false
+; Idle keep-alive timeout between requests (seconds).
+keepalive_timeout_secs = 60
+; Access log output path.
+access_log = "/var/log/migux/access.log"
 
-- `sendfile` (bool)
-- `keepalive_timeout_secs` (u64)
-- `access_log` (string path)
+; Timeouts (seconds).
+client_read_timeout_secs = 10
+proxy_connect_timeout_secs = 3
+proxy_read_timeout_secs = 30
+proxy_write_timeout_secs = 30
 
-`keepalive_timeout_secs` controls idle timeout between requests on the same client connection.
+; Limits (bytes).
+max_request_headers_bytes = 65536
+max_request_body_bytes = 10485760
+max_upstream_response_headers_bytes = 65536
+max_upstream_response_body_bytes = 10485760
 
-Timeouts:
-- `client_read_timeout_secs`
-- `proxy_connect_timeout_secs`
-- `proxy_read_timeout_secs`
-- `proxy_write_timeout_secs`
+; Upstream connection pool.
+proxy_pool_max_per_addr = 16
+proxy_pool_idle_timeout_secs = 60
 
-Limits (bytes):
-- `max_request_headers_bytes`
-- `max_request_body_bytes`
-- `max_upstream_response_headers_bytes`
-- `max_upstream_response_body_bytes`
+; Cache fields (defined but not wired yet).
+cache_dir = "/var/cache/migux"
+cache_default_ttl_secs = 30
+cache_max_object_bytes = 1048576
 
-Upstream pool:
-- `proxy_pool_max_per_addr`
-- `proxy_pool_idle_timeout_secs`
+; -------- upstreams --------
+[upstream.app]
+; Single "host:port" or list ["a:1","b:2"].
+server = ["127.0.0.1:3000", "127.0.0.1:3001"]
+; Load-balancing strategy: "round_robin" or "single".
+strategy = "round_robin"
 
-Cache fields (defined but not wired yet):
-- `cache_dir`
-- `cache_default_ttl_secs`
-- `cache_max_object_bytes`
+[upstream.app.health]
+; Failures before marking the upstream down.
+fail_threshold = 2
+; Cooldown time before retry (seconds).
+cooldown_secs = 10
+; Enable active TCP checks.
+active = false
+; Active check interval (seconds).
+interval_secs = 10
+; Active check timeout (seconds).
+timeout_secs = 1
 
-### [upstream.<name>]
+; -------- servers --------
+[server.main]
+; HTTP listen address.
+listen = "0.0.0.0:8080"
+server_name = "localhost"
+root = "./public"
+index = "index.html"
 
-- `server`: single `"host:port"` or list `["a:1","b:2"]`
-- `strategy`: `"round_robin"` or `"single"`
-- `health` (optional table)
-  - `fail_threshold` (default 1)
-  - `cooldown_secs` (default 10)
-  - `active` (default false)
-  - `interval_secs` (default 10)
-  - `timeout_secs` (default 1)
+[server.main.tls]
+; HTTPS listen address.
+listen = "0.0.0.0:8443"
+; Certificate and private key (PEM).
+cert_path = "/etc/migux/certs/fullchain.pem"
+key_path = "/etc/migux/certs/privkey.pem"
+; Redirect HTTP -> HTTPS.
+redirect_http = true
 
-### [server.<name>]
+; -------- locations --------
+[location.main_root]
+; Bind this location to server.main.
+server = "main"
+; Prefix match (longest prefix wins).
+path = "/"
+; static or proxy.
+type = "static"
+; Optional override (defaults to server.root/index).
+root = "./public"
+index = "index.html"
 
-- `listen`: `"0.0.0.0:8080"`
-- `server_name`
-- `root`
-- `index`
-- `tls` (optional table)
-  - `listen`: `"0.0.0.0:8443"`
-  - `cert_path`: `"/path/to/cert.pem"`
-  - `key_path`: `"/path/to/key.pem"`
-  - `redirect_http`: `true` (optional)
-
-### [location.<name>]
-
-- `server`: references a `[server.<name>]`
-- `path`: prefix match (longest prefix wins)
-- `type`: `static` or `proxy`
-- `root` (optional, static)
-- `index` (optional, static)
-- `upstream` (optional, proxy)
-- `strip_prefix` (parsed, not used yet)
-- `cache` (optional, not used yet)
+[location.api]
+server = "main"
+path = "/api"
+type = "proxy"
+upstream = "app"
+; Parsed but not used yet.
+strip_prefix = "/api"
+; Parsed but not used yet.
+cache = false
+```
 
 ## Proxy behavior
 
