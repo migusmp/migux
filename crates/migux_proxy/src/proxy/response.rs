@@ -31,7 +31,7 @@ pub(super) async fn stream_http_response(
     let headers_bytes = upstream.read_buf.split_to(headers_end + 4);
     let header_len = headers_bytes.len().saturating_sub(4);
 
-    let info = parse_response_headers(&headers_bytes[..header_len]);
+    let info = parse_response_headers(&headers_bytes[..header_len])?;
     let no_body = is_no_body(method, info.status_code);
 
     client_stream.write_all(&headers_bytes).await?;
@@ -104,7 +104,7 @@ fn find_headers_end(buf: &BytesMut) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ResponseInfo {
     content_length: Option<usize>,
     connection_close: bool,
@@ -114,15 +114,69 @@ struct ResponseInfo {
     status_code: Option<u16>,
 }
 
-fn parse_response_headers(header_bytes: &[u8]) -> ResponseInfo {
+#[derive(Default)]
+struct ContentLengthState {
+    value: Option<usize>,
+    invalid: bool,
+    conflict: bool,
+}
+
+impl ContentLengthState {
+    fn add(&mut self, raw: &str) {
+        let mut any = false;
+        for part in raw.split(',') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            any = true;
+            match trimmed.parse::<usize>() {
+                Ok(len) => {
+                    if let Some(prev) = self.value {
+                        if prev != len {
+                            self.conflict = true;
+                            self.invalid = true;
+                        }
+                    } else {
+                        self.value = Some(len);
+                    }
+                }
+                Err(_) => {
+                    self.invalid = true;
+                }
+            }
+        }
+        if !any {
+            self.invalid = true;
+        }
+    }
+}
+
+fn split_header_tokens(value: &str) -> impl Iterator<Item = String> + '_ {
+    value.split(',').filter_map(|token| {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(
+                trimmed
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_ascii_lowercase(),
+            )
+        }
+    })
+}
+
+fn parse_response_headers(header_bytes: &[u8]) -> anyhow::Result<ResponseInfo> {
     let header_str = String::from_utf8_lossy(header_bytes);
     let mut info = ResponseInfo::default();
+    let mut content_length = ContentLengthState::default();
 
     let mut lines = header_str.lines();
 
     if let Some(status_line) = lines.next() {
         debug!(target: "migux::proxy", status_line = %status_line, "Received upstream status line");
-        if status_line.contains("HTTP/1.0") {
+        if status_line.starts_with("HTTP/1.0") {
             info.is_http10 = true;
         }
         info.status_code = status_line
@@ -132,32 +186,51 @@ fn parse_response_headers(header_bytes: &[u8]) -> ResponseInfo {
     }
 
     for line in lines {
-        let lower = line.to_ascii_lowercase();
-
-        if let Some(rest) = lower.strip_prefix("content-length:")
-            && let Ok(len) = rest.trim().parse::<usize>()
-        {
-            info.content_length = Some(len);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
         }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        let name_lower = name.to_ascii_lowercase();
 
-        if let Some(rest) = lower.strip_prefix("connection:") {
-            let v = rest.trim();
-            if v.contains("close") {
-                info.connection_close = true;
+        match name_lower.as_str() {
+            "content-length" => {
+                content_length.add(value);
             }
-            if v.contains("keep-alive") {
-                info.connection_keep_alive = true;
+            "connection" => {
+                for token in split_header_tokens(value) {
+                    match token.as_str() {
+                        "close" => info.connection_close = true,
+                        "keep-alive" => info.connection_keep_alive = true,
+                        _ => {}
+                    }
+                }
             }
-        }
-
-        if let Some(rest) = lower.strip_prefix("transfer-encoding:")
-            && rest.trim().contains("chunked")
-        {
-            info.is_chunked = true;
+            "transfer-encoding" => {
+                for token in split_header_tokens(value) {
+                    if token == "chunked" {
+                        info.is_chunked = true;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    info
+    if content_length.invalid {
+        if content_length.conflict {
+            anyhow::bail!("Conflicting Content-Length in upstream response");
+        }
+        anyhow::bail!("Invalid Content-Length in upstream response");
+    }
+
+    info.content_length = content_length.value;
+
+    Ok(info)
 }
 
 fn is_no_body(method: &str, status_code: Option<u16>) -> bool {
@@ -311,4 +384,38 @@ async fn read_exact_from_buf(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_response_headers;
+
+    #[test]
+    fn parse_response_headers_accepts_duplicate_content_length() {
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n";
+        let info = parse_response_headers(headers).expect("expected ok");
+        assert_eq!(info.content_length, Some(5));
+    }
+
+    #[test]
+    fn parse_response_headers_rejects_conflicting_content_length() {
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n";
+        let err = parse_response_headers(headers).unwrap_err();
+        assert!(err.to_string().contains("Conflicting Content-Length"));
+    }
+
+    #[test]
+    fn parse_response_headers_rejects_invalid_content_length() {
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n";
+        let err = parse_response_headers(headers).unwrap_err();
+        assert!(err.to_string().contains("Invalid Content-Length"));
+    }
+
+    #[test]
+    fn parse_response_headers_detects_chunked_and_connection_tokens() {
+        let headers = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, \"chunked\"\r\nConnection: \"close\"\r\n\r\n";
+        let info = parse_response_headers(headers).expect("expected ok");
+        assert!(info.is_chunked);
+        assert!(info.connection_close);
+    }
 }

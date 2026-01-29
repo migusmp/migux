@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, BytesMut};
-use migux_http::responses::{send_404, send_408, send_413, send_431};
+use migux_http::responses::{send_400, send_404, send_408, send_413, send_431};
 use migux_proxy::Proxy;
 use migux_static::serve_static;
 use tokio::{
@@ -250,8 +250,27 @@ async fn read_http_request(
         "Parsed HTTP headers"
     );
 
-    let (method, path, http_version, content_length, close_after, is_chunked) =
-        parse_request_metadata(&headers_str);
+    let meta = match parse_request_metadata(&headers_str) {
+        Ok(meta) => meta,
+        Err(err) => {
+            warn!(
+                target: "migux::http",
+                error = ?err,
+                "Invalid request headers"
+            );
+            send_400(stream).await?;
+            return Ok(None);
+        }
+    };
+
+    let RequestMetadata {
+        method,
+        path,
+        http_version,
+        mut content_length,
+        close_after,
+        is_chunked,
+    } = meta;
 
     if is_chunked && content_length > 0 {
         warn!(
@@ -259,6 +278,7 @@ async fn read_http_request(
             content_length,
             "Ignoring Content-Length because Transfer-Encoding is chunked"
         );
+        content_length = 0;
     }
 
     if !is_chunked && content_length > 0 {
@@ -312,7 +332,76 @@ async fn read_more(
     }
 }
 
-fn parse_request_metadata(headers: &str) -> (String, String, String, usize, bool, bool) {
+#[derive(Debug)]
+struct RequestMetadata {
+    method: String,
+    path: String,
+    http_version: String,
+    content_length: usize,
+    close_after: bool,
+    is_chunked: bool,
+}
+
+#[derive(Debug)]
+enum HeaderParseError {
+    InvalidContentLength,
+    ConflictingContentLength,
+}
+
+#[derive(Default)]
+struct ContentLengthState {
+    value: Option<usize>,
+    invalid: bool,
+    conflict: bool,
+}
+
+impl ContentLengthState {
+    fn add(&mut self, raw: &str) {
+        let mut any = false;
+        for part in raw.split(',') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            any = true;
+            match trimmed.parse::<usize>() {
+                Ok(len) => {
+                    if let Some(prev) = self.value {
+                        if prev != len {
+                            self.conflict = true;
+                            self.invalid = true;
+                        }
+                    } else {
+                        self.value = Some(len);
+                    }
+                }
+                Err(_) => {
+                    self.invalid = true;
+                }
+            }
+        }
+        if !any {
+            self.invalid = true;
+        }
+    }
+}
+
+fn split_header_tokens(value: &str) -> impl Iterator<Item = String> + '_ {
+    value.split(',').filter_map(|token| {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(
+                trimmed
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_ascii_lowercase(),
+            )
+        }
+    })
+}
+
+fn parse_request_metadata(headers: &str) -> Result<RequestMetadata, HeaderParseError> {
     let mut lines = headers.lines();
     let request_line = lines.next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
@@ -320,41 +409,70 @@ fn parse_request_metadata(headers: &str) -> (String, String, String, usize, bool
     let path = parts.next().unwrap_or("/").to_string();
     let http_version = parts.next().unwrap_or("HTTP/1.1").to_string();
 
-    let mut content_length = 0usize;
+    let mut content_length = ContentLengthState::default();
     let mut connection_close = false;
     let mut connection_keep_alive = false;
     let mut is_chunked = false;
 
     for line in lines {
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("content-length:") {
-            if let Ok(len) = rest.trim().parse::<usize>() {
-                content_length = len;
-            }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
         }
-        if let Some(rest) = lower.strip_prefix("connection:") {
-            let v = rest.trim();
-            if v.contains("close") {
-                connection_close = true;
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        let name_lower = name.to_ascii_lowercase();
+
+        match name_lower.as_str() {
+            "content-length" => {
+                content_length.add(value);
             }
-            if v.contains("keep-alive") {
-                connection_keep_alive = true;
+            "connection" | "proxy-connection" => {
+                for token in split_header_tokens(value) {
+                    match token.as_str() {
+                        "close" => connection_close = true,
+                        "keep-alive" => connection_keep_alive = true,
+                        _ => {}
+                    }
+                }
             }
-        }
-        if let Some(rest) = lower.strip_prefix("transfer-encoding:")
-            && rest.contains("chunked")
-        {
-            is_chunked = true;
+            "transfer-encoding" => {
+                for token in split_header_tokens(value) {
+                    if token == "chunked" {
+                        is_chunked = true;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
+    if content_length.invalid {
+        let err = if content_length.conflict {
+            HeaderParseError::ConflictingContentLength
+        } else {
+            HeaderParseError::InvalidContentLength
+        };
+        return Err(err);
+    }
+
     let close_after = if http_version == "HTTP/1.0" {
-        !connection_keep_alive
+        !connection_keep_alive || connection_close
     } else {
         connection_close
     };
 
-    (method, path, http_version, content_length, close_after, is_chunked)
+    Ok(RequestMetadata {
+        method,
+        path,
+        http_version,
+        content_length: content_length.value.unwrap_or(0),
+        close_after,
+        is_chunked,
+    })
 }
 
 enum ChunkedBodyError {
@@ -475,4 +593,45 @@ fn find_crlf(buf: &BytesMut, start: usize) -> Option<usize> {
         .windows(2)
         .position(|w| w == b"\r\n")
         .map(|i| start + i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_request_metadata, HeaderParseError};
+
+    #[test]
+    fn parse_request_metadata_accepts_duplicate_content_length() {
+        let headers = "POST /upload HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n";
+        let meta = parse_request_metadata(headers).expect("expected ok");
+        assert_eq!(meta.content_length, 5);
+    }
+
+    #[test]
+    fn parse_request_metadata_rejects_conflicting_content_length() {
+        let headers = "POST /upload HTTP/1.1\r\nHost: example\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n";
+        let err = parse_request_metadata(headers).unwrap_err();
+        assert!(matches!(err, HeaderParseError::ConflictingContentLength));
+    }
+
+    #[test]
+    fn parse_request_metadata_rejects_invalid_content_length() {
+        let headers = "POST /upload HTTP/1.1\r\nHost: example\r\nContent-Length: nope\r\n\r\n";
+        let err = parse_request_metadata(headers).unwrap_err();
+        assert!(matches!(err, HeaderParseError::InvalidContentLength));
+    }
+
+    #[test]
+    fn parse_request_metadata_connection_tokens() {
+        let headers = "GET / HTTP/1.1\r\nConnection: \"keep-alive\", close\r\n\r\n";
+        let meta = parse_request_metadata(headers).expect("expected ok");
+        assert!(meta.close_after);
+    }
+
+    #[test]
+    fn parse_request_metadata_detects_chunked_with_tokens() {
+        let headers = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, \"chunked\"\r\nContent-Length: 10\r\n\r\n";
+        let meta = parse_request_metadata(headers).expect("expected ok");
+        assert!(meta.is_chunked);
+        assert_eq!(meta.content_length, 10);
+    }
 }
