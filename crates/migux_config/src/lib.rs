@@ -247,7 +247,7 @@ impl Default for LocationConfig {
 }
 
 // =======================================================
-// MIGUX CONFIG — Config principal
+// MIGUX CONFIG — main config
 // =======================================================
 #[derive(Debug, Deserialize)]
 pub struct MiguxConfig {
