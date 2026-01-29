@@ -10,7 +10,7 @@ cd migux
 cargo run
 ```
 
-By default it loads `migux.conf` from the current working directory.
+It tries to load `migux.conf` from the current working directory; if the file is missing or invalid, it falls back to built-in defaults.
 
 ## Architecture overview
 
