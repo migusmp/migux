@@ -112,6 +112,11 @@ Cache fields (defined but not wired yet):
 - `server_name`
 - `root`
 - `index`
+- `tls` (optional table)
+  - `listen`: `"0.0.0.0:8443"`
+  - `cert_path`: `"/path/to/cert.pem"`
+  - `key_path`: `"/path/to/key.pem"`
+  - `redirect_http`: `true` (optional)
 
 ### [location.<name>]
 
@@ -146,6 +151,20 @@ Cache fields (defined but not wired yet):
   - Fallback to EOF-delimited body (non-reusable).
   - Handles no-body responses (1xx, 204, 304, HEAD).
 
+## TLS termination (optional)
+
+If configured, Migux can terminate HTTPS and (optionally) redirect HTTP to HTTPS.
+
+Example:
+
+```
+[server.main.tls]
+listen = "0.0.0.0:8443"
+cert_path = "/etc/migux/certs/fullchain.pem"
+key_path = "/etc/migux/certs/privkey.pem"
+redirect_http = true
+```
+
 ## Static file server
 
 - Resolves files based on `root` and `index`.
@@ -161,4 +180,3 @@ Helpers exist for: 404, 405, 408, 413, 431, 500, 502, 501.
 - HTTP/2 not supported.
 - `strip_prefix` config is parsed but not used yet (uses `location.path`).
 - Cache config is not wired yet.
-- No TLS.

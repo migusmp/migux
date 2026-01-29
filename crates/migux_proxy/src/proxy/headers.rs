@@ -18,6 +18,7 @@
 pub(super) fn rewrite_proxy_headers(
     req_headers: &str,
     client_ip: &str,
+    scheme: &str,
     keep_alive: bool,
     body_len: usize,
     is_chunked: bool,
@@ -79,7 +80,7 @@ pub(super) fn rewrite_proxy_headers(
     // Add forward headers
     headers.push(("X-Forwarded-For".to_string(), client_ip.to_string()));
     headers.push(("X-Real-IP".to_string(), client_ip.to_string()));
-    headers.push(("X-Forwarded-Proto".to_string(), "http".to_string()));
+    headers.push(("X-Forwarded-Proto".to_string(), scheme.to_string()));
 
     if let Some(h) = host_value {
         headers.push(("X-Forwarded-Host".to_string(), h));
@@ -150,7 +151,7 @@ mod tests {
     #[test]
     fn rewrite_proxy_headers_drops_connection_token_headers() {
         let req = "GET / HTTP/1.1\r\nHost: example\r\nConnection: \"Foo\", keep-alive\r\nFoo: bar\r\nX-Test: ok\r\n\r\n";
-        let out = rewrite_proxy_headers(req, "127.0.0.1", true, 0, false);
+        let out = rewrite_proxy_headers(req, "127.0.0.1", "http", true, 0, false);
         assert!(!out.contains("\r\nFoo:"));
         assert!(out.contains("\r\nX-Test: ok\r\n"));
         assert!(out.contains("\r\nConnection: keep-alive\r\n"));
@@ -159,7 +160,7 @@ mod tests {
     #[test]
     fn rewrite_proxy_headers_sets_chunked_without_content_length() {
         let req = "POST /upload HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\nContent-Length: 10\r\n\r\n";
-        let out = rewrite_proxy_headers(req, "127.0.0.1", true, 10, true);
+        let out = rewrite_proxy_headers(req, "127.0.0.1", "https", true, 10, true);
         assert!(out.contains("\r\nTransfer-Encoding: chunked\r\n"));
         assert!(!out.contains("\r\nContent-Length: 10\r\n"));
     }

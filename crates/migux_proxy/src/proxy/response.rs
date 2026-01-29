@@ -1,7 +1,6 @@
 use bytes::BytesMut;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     time::{timeout, Duration},
 };
 use tracing::{debug, instrument, warn};
@@ -19,14 +18,17 @@ use super::PooledStream;
 ///   - content-length: forwardea exactamente CL bytes
 ///   - sin CL: read-to-EOF (no reusable)
 #[instrument(skip(upstream, client_stream))]
-pub(super) async fn stream_http_response(
+pub(super) async fn stream_http_response<S>(
     upstream: &mut PooledStream,
-    client_stream: &mut TcpStream,
+    client_stream: &mut S,
     method: &str,
     read_timeout: Duration,
     max_headers: usize,
     max_body: usize,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<bool>
+where
+    S: AsyncWrite + Unpin,
+{
     let headers_end = read_response_headers(upstream, read_timeout, max_headers).await?;
     let headers_bytes = upstream.read_buf.split_to(headers_end + 4);
     let header_len = headers_bytes.len().saturating_sub(4);
@@ -244,12 +246,15 @@ fn is_no_body(method: &str, status_code: Option<u16>) -> bool {
     }
 }
 
-async fn stream_content_length(
+async fn stream_content_length<S>(
     upstream: &mut PooledStream,
-    client_stream: &mut TcpStream,
+    client_stream: &mut S,
     mut remaining: usize,
     read_timeout: Duration,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<bool>
+where
+    S: AsyncWrite + Unpin,
+{
     while remaining > 0 {
         if upstream.read_buf.is_empty() {
             let n = read_more(upstream, read_timeout).await?;
@@ -272,12 +277,15 @@ async fn stream_content_length(
     Ok(true)
 }
 
-async fn stream_until_eof(
+async fn stream_until_eof<S>(
     upstream: &mut PooledStream,
-    client_stream: &mut TcpStream,
+    client_stream: &mut S,
     read_timeout: Duration,
     max_body: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let mut body_bytes = 0usize;
 
     if !upstream.read_buf.is_empty() {
@@ -305,12 +313,15 @@ async fn stream_until_eof(
     Ok(())
 }
 
-async fn stream_chunked_body(
+async fn stream_chunked_body<S>(
     upstream: &mut PooledStream,
-    client_stream: &mut TcpStream,
+    client_stream: &mut S,
     read_timeout: Duration,
     max_body: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let mut body_bytes = 0usize;
 
     loop {
@@ -363,12 +374,15 @@ async fn read_line(upstream: &mut PooledStream, read_timeout: Duration) -> anyho
     }
 }
 
-async fn read_exact_from_buf(
+async fn read_exact_from_buf<S>(
     upstream: &mut PooledStream,
-    client_stream: &mut TcpStream,
+    client_stream: &mut S,
     read_timeout: Duration,
     mut remaining: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     while remaining > 0 {
         if upstream.read_buf.is_empty() {
             let n = read_more(upstream, read_timeout).await?;

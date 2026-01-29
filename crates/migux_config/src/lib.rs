@@ -148,6 +148,7 @@ pub struct ServerConfig {
     pub server_name: String,
     pub root: String,
     pub index: String,
+    pub tls: Option<TlsConfig>,
 }
 
 impl Default for ServerConfig {
@@ -157,6 +158,30 @@ impl Default for ServerConfig {
             server_name: "localhost".into(),
             root: "./public".into(),
             index: "index.html".into(),
+            tls: None,
+        }
+    }
+}
+
+// =======================================================
+// TLS CONFIG
+// =======================================================
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct TlsConfig {
+    pub listen: String,
+    pub cert_path: String,
+    pub key_path: String,
+    pub redirect_http: bool,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            listen: "0.0.0.0:8443".into(),
+            cert_path: String::new(),
+            key_path: String::new(),
+            redirect_http: false,
         }
     }
 }
@@ -332,6 +357,7 @@ impl MiguxConfig {
 
         // SERVERS
         let def_server = ServerConfig::default();
+        let def_tls = TlsConfig::default();
 
         for s in self.servers.values_mut() {
             if s.listen.is_empty() {
@@ -345,6 +371,11 @@ impl MiguxConfig {
             }
             if s.index.is_empty() {
                 s.index = def_server.index.clone();
+            }
+            if let Some(tls) = s.tls.as_mut() {
+                if tls.listen.is_empty() {
+                    tls.listen = def_tls.listen.clone();
+                }
             }
         }
 
@@ -446,6 +477,12 @@ impl MiguxConfig {
             println!("    server_name = {}", srv.server_name);
             println!("    root        = {}", srv.root);
             println!("    index       = {}", srv.index);
+            if let Some(tls) = &srv.tls {
+                println!("    tls.listen        = {}", tls.listen);
+                println!("    tls.cert_path     = {}", tls.cert_path);
+                println!("    tls.key_path      = {}", tls.key_path);
+                println!("    tls.redirect_http = {}", tls.redirect_http);
+            }
         }
 
         println!("\n[location]");

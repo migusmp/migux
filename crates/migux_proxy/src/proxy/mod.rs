@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use migux_config::{LocationConfig, MiguxConfig, UpstreamConfig};
 use migux_http::responses::send_502;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     time::{interval, timeout, Duration},
 };
@@ -248,9 +248,9 @@ impl Proxy {
         skip(self, client_stream, client_buf, location, req_headers, cfg),
         fields(client = %client_addr, location_path = %location.path)
     )]
-    pub async fn serve(
+    pub async fn serve<S>(
         &self,
-        client_stream: &mut TcpStream,
+        client_stream: &mut S,
         client_buf: &mut BytesMut,
         location: &LocationConfig,
         req_headers: &str,
@@ -259,9 +259,13 @@ impl Proxy {
         http_version: &str,
         content_length: usize,
         is_chunked: bool,
+        client_is_tls: bool,
         cfg: &Arc<MiguxConfig>,
         client_addr: &SocketAddr,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         // 1) localizar el upstream de la location
         let upstream_name = location
             .upstream
@@ -308,9 +312,11 @@ impl Proxy {
         // 6) reescribir headers para upstream
         let keep_alive = http_version != "HTTP/1.0";
         let upstream_is_chunked = is_chunked && content_length == 0;
+        let scheme = if client_is_tls { "https" } else { "http" };
         let rest_of_headers = headers::rewrite_proxy_headers(
             req_headers,
             &client_ip,
+            scheme,
             keep_alive,
             content_length,
             upstream_is_chunked,
@@ -524,15 +530,18 @@ impl Proxy {
     }
 }
 
-async fn stream_request_body(
-    client_stream: &mut TcpStream,
+async fn stream_request_body<S>(
+    client_stream: &mut S,
     client_buf: &mut BytesMut,
     upstream_stream: &mut TcpStream,
     is_chunked: bool,
     content_length: usize,
     read_timeout: Duration,
     max_body: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     if is_chunked && content_length == 0 {
         stream_chunked_body(
             client_stream,
@@ -563,13 +572,16 @@ async fn stream_request_body(
     .await
 }
 
-async fn stream_chunked_body(
-    client_stream: &mut TcpStream,
+async fn stream_chunked_body<S>(
+    client_stream: &mut S,
     client_buf: &mut BytesMut,
     upstream_stream: &mut TcpStream,
     read_timeout: Duration,
     max_body: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut body_bytes = 0usize;
 
     loop {
@@ -609,11 +621,14 @@ async fn stream_chunked_body(
     }
 }
 
-async fn read_line_bytes(
-    client_stream: &mut TcpStream,
+async fn read_line_bytes<S>(
+    client_stream: &mut S,
     client_buf: &mut BytesMut,
     read_timeout: Duration,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
     loop {
         if let Some(end) = find_crlf(client_buf, 0) {
             let line = client_buf.split_to(end + 2);
@@ -623,13 +638,16 @@ async fn read_line_bytes(
     }
 }
 
-async fn stream_exact(
-    client_stream: &mut TcpStream,
+async fn stream_exact<S>(
+    client_stream: &mut S,
     client_buf: &mut BytesMut,
     upstream_stream: &mut TcpStream,
     mut remaining: usize,
     read_timeout: Duration,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     while remaining > 0 {
         if !client_buf.is_empty() {
             let take = remaining.min(client_buf.len());
@@ -660,11 +678,14 @@ async fn stream_exact(
     Ok(())
 }
 
-async fn read_more_client(
-    client_stream: &mut TcpStream,
+async fn read_more_client<S>(
+    client_stream: &mut S,
     client_buf: &mut BytesMut,
     read_timeout: Duration,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + Unpin,
+{
     let mut tmp = [0u8; 4096];
     let n = match timeout(read_timeout, client_stream.read(&mut tmp)).await {
         Ok(res) => res?,

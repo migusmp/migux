@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use migux_config::{LocationConfig, LocationType, MiguxConfig};
 
-use crate::{structs::ServerRuntime, types::ServersByListen};
+use crate::{structs::ServerRuntime, types::{ServersByListen, TlsListenConfig, TlsServersByListen}};
 
 pub mod master;
 pub mod structs;
@@ -61,5 +61,50 @@ pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
             locations,
         ));
     }
+    map
+}
+
+pub fn build_tls_servers_by_listen(cfg: &MiguxConfig) -> TlsServersByListen {
+    let mut map: TlsServersByListen = HashMap::new();
+
+    for (server_name, server_cfg) in &cfg.servers {
+        let Some(tls_cfg) = &server_cfg.tls else {
+            continue;
+        };
+
+        let listen_key = tls_cfg.listen.clone();
+        let mut locations: Vec<LocationConfig> = cfg
+            .location
+            .values()
+            .filter(|loc| loc.server == *server_name)
+            .cloned()
+            .collect();
+
+        if locations.is_empty() {
+            locations.push(LocationConfig {
+                server: server_name.clone(),
+                path: "/".into(),
+                r#type: LocationType::Static,
+                root: Some(server_cfg.root.clone()),
+                index: Some(server_cfg.index.clone()),
+                upstream: None,
+                strip_prefix: None,
+                cache: None,
+            });
+        }
+
+        let runtime = ServerRuntime::new(server_name.clone(), server_cfg.clone(), locations);
+
+        map.entry(listen_key.clone())
+            .and_modify(|entry| {
+                entry.servers.push(runtime.clone());
+            })
+            .or_insert_with(|| TlsListenConfig {
+                listen: listen_key,
+                tls: tls_cfg.clone(),
+                servers: vec![runtime],
+            });
+    }
+
     map
 }

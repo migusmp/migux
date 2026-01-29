@@ -1,5 +1,5 @@
 use mime_guess::mime;
-use tokio::{fs, io::AsyncWriteExt, net::TcpStream};
+use tokio::{fs, io::{AsyncWrite, AsyncWriteExt}};
 
 use migux_config::{LocationConfig, ServerConfig};
 
@@ -37,7 +37,7 @@ fn build_500() -> Vec<u8> {
 }
 
 pub async fn serve_static(
-    stream: &mut TcpStream,
+    stream: &mut (impl AsyncWrite + Unpin),
     server_cfg: &ServerConfig,
     location: &LocationConfig,
     req_path: &str,

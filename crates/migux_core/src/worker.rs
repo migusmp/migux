@@ -1,12 +1,11 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, BytesMut};
-use migux_http::responses::{send_400, send_404, send_408, send_413, send_431};
+use migux_http::responses::{send_400, send_404, send_408, send_413, send_431, send_redirect};
 use migux_proxy::Proxy;
 use migux_static::serve_static;
 use tokio::{
-    io::AsyncReadExt,
-    net::TcpStream,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite},
     time::{timeout, Duration},
 };
 use tracing::{debug, info, instrument, warn};
@@ -19,6 +18,10 @@ mod routing;
 
 use routing::{match_location, select_default_server};
 
+pub trait ClientStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> ClientStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
 /// Entry point for a “logical worker” that handles a single connection.
 #[instrument(
     skip(stream, servers, proxy, cfg),
@@ -27,11 +30,12 @@ use routing::{match_location, select_default_server};
     )
 )]
 pub async fn handle_connection(
-    mut stream: TcpStream,
+    mut stream: Box<dyn ClientStream>,
     client_addr: SocketAddr,
     servers: Arc<Vec<ServerRuntime>>,
     proxy: Arc<Proxy>,
     cfg: Arc<MiguxConfig>,
+    is_tls: bool,
 ) -> anyhow::Result<()> {
     info!(target: "migux::worker", "Handling new client connection");
 
@@ -75,6 +79,18 @@ pub async fn handle_connection(
             index = %server.config.index,
             "Selected server for request"
         );
+
+        if !is_tls {
+            if let Some(tls_cfg) = &server.config.tls {
+                if tls_cfg.redirect_http {
+                    let host = extract_host_header(&req.headers)
+                        .unwrap_or_else(|| server.config.server_name.clone());
+                    let location = build_https_redirect(&host, &req.path, &tls_cfg.listen);
+                    send_redirect(&mut stream, &location).await?;
+                    break;
+                }
+            }
+        }
 
         if server.locations.is_empty() {
             warn!(
@@ -166,6 +182,7 @@ pub async fn handle_connection(
                         &req.http_version,
                         req.content_length,
                         req.is_chunked,
+                        is_tls,
                         &cfg,
                         &client_addr,
                     )
@@ -208,7 +225,7 @@ struct ParsedRequest {
 
 #[instrument(skip(stream, buf, http), fields())]
 async fn read_http_request(
-    stream: &mut TcpStream,
+    stream: &mut dyn ClientStream,
     buf: &mut BytesMut,
     http: &HttpConfig,
     idle_timeout: Duration,
@@ -315,7 +332,7 @@ enum ReadOutcome {
 }
 
 async fn read_more(
-    stream: &mut TcpStream,
+    stream: &mut dyn ClientStream,
     buf: &mut BytesMut,
     timeout_dur: Duration,
 ) -> anyhow::Result<ReadOutcome> {
@@ -483,7 +500,7 @@ enum ChunkedBodyError {
 }
 
 async fn discard_chunked_body(
-    stream: &mut TcpStream,
+    stream: &mut dyn ClientStream,
     buf: &mut BytesMut,
     read_timeout: Duration,
     max_body: usize,
@@ -518,7 +535,7 @@ async fn discard_chunked_body(
 }
 
 async fn read_line_bytes(
-    stream: &mut TcpStream,
+    stream: &mut dyn ClientStream,
     buf: &mut BytesMut,
     read_timeout: Duration,
 ) -> Result<Vec<u8>, ChunkedBodyError> {
@@ -539,7 +556,7 @@ async fn read_line_bytes(
 }
 
 async fn discard_exact(
-    stream: &mut TcpStream,
+    stream: &mut dyn ClientStream,
     buf: &mut BytesMut,
     mut remaining: usize,
     read_timeout: Duration,
@@ -564,7 +581,7 @@ async fn discard_exact(
 }
 
 async fn discard_content_length(
-    stream: &mut TcpStream,
+    stream: &mut dyn ClientStream,
     buf: &mut BytesMut,
     mut remaining: usize,
     read_timeout: Duration,
@@ -593,6 +610,61 @@ fn find_crlf(buf: &BytesMut, start: usize) -> Option<usize> {
         .windows(2)
         .position(|w| w == b"\r\n")
         .map(|i| start + i)
+}
+
+fn extract_host_header(headers: &str) -> Option<String> {
+    for line in headers.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("host") {
+            let host = value.trim();
+            if !host.is_empty() {
+                return Some(host.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn build_https_redirect(host: &str, path: &str, tls_listen: &str) -> String {
+    let (host_part, _) = split_host_port(host);
+    let mut port = None;
+    if let Ok(addr) = tls_listen.parse::<std::net::SocketAddr>() {
+        port = Some(addr.port());
+    }
+    match port {
+        Some(443) | None => format!("https://{}{}", host_part, path),
+        Some(p) => format!("https://{}:{}{}", host_part, p, path),
+    }
+}
+
+fn split_host_port(host: &str) -> (String, Option<String>) {
+    let host = host.trim();
+    if host.starts_with('[') {
+        if let Some(end) = host.find(']') {
+            let host_part = host[..=end].to_string();
+            let rest = &host[end + 1..];
+            if let Some(port) = rest.strip_prefix(':') {
+                return (host_part, Some(port.to_string()));
+            }
+            return (host_part, None);
+        }
+    }
+
+    if let Some(idx) = host.rfind(':') {
+        let (left, right) = host.split_at(idx);
+        let port = &right[1..];
+        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return (left.to_string(), Some(port.to_string()));
+        }
+    }
+
+    (host.to_string(), None)
 }
 
 #[cfg(test)]
