@@ -13,14 +13,13 @@
 ///   - X-Forwarded-Host (si habia Host)
 ///
 /// Y ademas:
-/// - Fuerzas `Connection: close` hacia upstream.
-///   Esto simplifica MUCHO al principio porque:
-///   - no tienes que manejar chunked bien
-///   - no tienes que manejar pipeline/keepalive real
-///
-/// OJO: ahora mismo tambien tienes un pool de conexiones.
-/// Forzar Connection: close reduce la utilidad del pool.
-pub(super) fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> String {
+/// - Controla `Connection` hacia upstream (keep-alive o close)
+///   segun la politica que decidas en el caller.
+pub(super) fn rewrite_proxy_headers(
+    req_headers: &str,
+    client_ip: &str,
+    keep_alive: bool,
+) -> String {
     let mut lines = req_headers.lines();
     let _ = lines.next(); // request line (GET /... HTTP/1.1)
 
@@ -77,8 +76,8 @@ pub(super) fn rewrite_proxy_headers(req_headers: &str, client_ip: &str) -> Strin
         headers.push(("X-Forwarded-Host".to_string(), h));
     }
 
-    // Forzar cierre hacia upstream
-    headers.push(("Connection".to_string(), "close".to_string()));
+    let connection_value = if keep_alive { "keep-alive" } else { "close" };
+    headers.push(("Connection".to_string(), connection_value.to_string()));
 
     // Serializa headers con CRLF
     let mut out = String::new();

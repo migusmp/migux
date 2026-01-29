@@ -186,7 +186,7 @@ async fn read_http_request(
             break;
         }
 
-        if buf.len() > max_headers {
+        if max_headers > 0 && buf.len() > max_headers {
             send_431(stream).await?;
             return Ok((String::new(), Vec::new()));
         }
@@ -213,7 +213,7 @@ async fn read_http_request(
     }
 
     if content_length > 0 {
-        if content_length > max_body {
+        if max_body > 0 && content_length > max_body {
             send_413(stream).await?;
             return Ok((String::new(), Vec::new()));
         }
@@ -229,7 +229,7 @@ async fn read_http_request(
     let mut body = Vec::new();
 
     if already_read_body > 0 && headers_end + 4 <= buf.len() {
-        if already_read_body > max_body {
+        if max_body > 0 && already_read_body > max_body {
             send_413(stream).await?;
             return Ok((String::new(), Vec::new()));
         }

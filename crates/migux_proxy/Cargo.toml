@@ -8,6 +8,7 @@ migux_config = { path = "../migux_config" }
 migux_http = { path = "../migux_http" }
 
 anyhow = { workspace = true }
+bytes = { workspace = true }
 dashmap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

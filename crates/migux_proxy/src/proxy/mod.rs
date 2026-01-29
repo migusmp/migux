@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::atomic::AtomicUsize, sync::Arc};
 
+use bytes::BytesMut;
 use dashmap::DashMap;
 use migux_config::{LocationConfig, MiguxConfig};
 use migux_http::responses::{send_404, send_502};
@@ -30,7 +31,21 @@ pub struct Proxy {
     rr_counters: DashMap<String, AtomicUsize>,
 
     /// Connection pools por upstream address
-    pools: DashMap<String, Vec<TcpStream>>,
+    pools: DashMap<String, Vec<PooledStream>>,
+}
+
+pub(super) struct PooledStream {
+    stream: TcpStream,
+    read_buf: BytesMut,
+}
+
+impl PooledStream {
+    fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            read_buf: BytesMut::new(),
+        }
+    }
 }
 
 impl Proxy {
@@ -58,27 +73,28 @@ impl Proxy {
         &self,
         addr: &str,
         connect_timeout: Duration,
-    ) -> anyhow::Result<TcpStream> {
+    ) -> anyhow::Result<PooledStream> {
         // Intenta sacar uno del pool
         if let Some(mut entry) = self.pools.get_mut(addr)
-            && let Some(stream) = entry.pop()
+            && let Some(pooled) = entry.pop()
         {
             debug!(target: "migux::proxy", upstream = %addr, "Reusing pooled upstream connection");
-            return Ok(stream);
+            return Ok(pooled);
         }
 
         info!(target: "migux::proxy", upstream = %addr, "Creating new upstream connection");
-        connect_with_timeout(addr, connect_timeout).await
+        let stream = connect_with_timeout(addr, connect_timeout).await?;
+        Ok(PooledStream::new(stream))
     }
 
     /// Returns an upstream connection back to the pool so it can be reused.
     ///
-    /// Solo se llama si `read_http_response` decide que la conexion es reusable.
-    fn checkin_upstream_stream(&self, addr: &str, stream: TcpStream) {
+    /// Solo se llama si el streamer decide que la conexion es reusable.
+    fn checkin_upstream_stream(&self, addr: &str, pooled: PooledStream) {
         self.pools
             .entry(addr.to_string())
             .or_insert_with(Vec::new)
-            .push(stream);
+            .push(pooled);
 
         debug!(target: "migux::proxy", upstream = %addr, "Returned upstream connection to pool");
     }
@@ -162,7 +178,8 @@ impl Proxy {
         );
 
         // 6) reescribir headers para upstream
-        let rest_of_headers = headers::rewrite_proxy_headers(req_headers, &client_ip);
+        let keep_alive = http_version != "HTTP/1.0";
+        let rest_of_headers = headers::rewrite_proxy_headers(req_headers, &client_ip, keep_alive);
 
         // 7) construir request completa (start line + headers + blank line + body)
         let mut out = Vec::new();
@@ -201,7 +218,7 @@ impl Proxy {
             //
             // Si falla, asumes que es un socket reutilizado muerto.
             // Intentas UNA vez reconectar fresh al mismo upstream_addr.
-            match timeout(write_timeout, upstream_stream.write_all(&out)).await {
+            match timeout(write_timeout, upstream_stream.stream.write_all(&out)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     error!(
@@ -213,7 +230,7 @@ impl Proxy {
 
                     match connect_fresh(upstream_addr, connect_timeout).await {
                         Ok(mut fresh) => {
-                            match timeout(write_timeout, fresh.write_all(&out)).await {
+                            match timeout(write_timeout, fresh.stream.write_all(&out)).await {
                                 Ok(Ok(())) => {
                                     upstream_stream = fresh;
                                 }
@@ -262,7 +279,7 @@ impl Proxy {
 
                     match connect_fresh(upstream_addr, connect_timeout).await {
                         Ok(mut fresh) => {
-                            match timeout(write_timeout, fresh.write_all(&out)).await {
+                            match timeout(write_timeout, fresh.stream.write_all(&out)).await {
                                 Ok(Ok(())) => {
                                     upstream_stream = fresh;
                                 }
@@ -304,15 +321,19 @@ impl Proxy {
                 }
             }
 
-            // 8.3) leer respuesta completa del upstream + decidir reusabilidad
-            let (resp_bytes, reusable) = match timeout(
+            // 8.3) leer respuesta del upstream y streamear al cliente
+            let reusable = match response::stream_http_response(
+                &mut upstream_stream,
+                client_stream,
+                method,
                 read_timeout,
-                response::read_http_response(&mut upstream_stream, max_resp_headers, max_resp_body),
+                max_resp_headers,
+                max_resp_body,
             )
             .await
             {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
+                Ok(r) => r,
+                Err(e) => {
                     error!(
                         target: "migux::proxy",
                         upstream_addr = %upstream_addr,
@@ -322,30 +343,7 @@ impl Proxy {
                     last_err = Some(e);
                     continue;
                 }
-                Err(_) => {
-                    error!(
-                        target: "migux::proxy",
-                        upstream_addr = %upstream_addr,
-                        "Timed out reading response from upstream"
-                    );
-                    last_err = Some(anyhow::anyhow!(
-                        "Upstream read timeout from {}",
-                        upstream_addr
-                    ));
-                    continue;
-                }
             };
-
-            // 8.4) devolver respuesta al cliente
-            if let Err(e) = client_stream.write_all(&resp_bytes).await {
-                error!(target: "migux::proxy", error=?e, "Error writing proxied response back to client");
-                last_err = Some(e.into());
-                continue;
-            }
-
-            if let Err(e) = client_stream.flush().await {
-                warn!(target: "migux::proxy", error=?e, "Error flushing response to client");
-            }
 
             // 8.5) si reusable, devolver socket al pool
             if reusable {
@@ -376,8 +374,9 @@ impl Default for Proxy {
 
 /// Crea una conexion nueva (fresh) a un upstream.
 /// Se usa como fallback si una conexion reutilizada estaba muerta.
-async fn connect_fresh(addr: &str, timeout_dur: Duration) -> anyhow::Result<TcpStream> {
-    connect_with_timeout(addr, timeout_dur).await
+async fn connect_fresh(addr: &str, timeout_dur: Duration) -> anyhow::Result<PooledStream> {
+    let stream = connect_with_timeout(addr, timeout_dur).await?;
+    Ok(PooledStream::new(stream))
 }
 
 async fn connect_with_timeout(addr: &str, timeout_dur: Duration) -> anyhow::Result<TcpStream> {

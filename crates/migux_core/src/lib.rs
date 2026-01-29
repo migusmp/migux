@@ -61,8 +61,5 @@ pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
             locations,
         ));
     }
-
-    println!("MAAAAAP: {:?}", map);
-
     map
 }
