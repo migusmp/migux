@@ -1,150 +1,23 @@
+//! Static file serving and cache utilities.
+//!
+//! Provides a minimal static file handler with optional in-memory and
+//! disk-backed caching, respecting configured TTL and object size limits.
+
+mod cache;
+mod fs;
+mod response;
+
 use mime_guess::mime;
-use tokio::{fs, io::{AsyncWrite, AsyncWriteExt}};
-use std::{
-    collections::HashMap,
-    hash::{Hash, Hasher},
-    path::PathBuf,
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::fs as tokio_fs;
+use std::time::{Duration, UNIX_EPOCH};
 
 use migux_config::{HttpConfig, LocationConfig, ServerConfig};
+use cache::{cache_enabled, cache_get, cache_put, disk_cache_get, disk_cache_put};
+use fs::resolve_relative_path;
+use response::{build_404, build_500, build_response_bytes};
 
-struct CacheEntry {
-    response: Vec<u8>,
-    expires_at: Instant,
-}
-
-static STATIC_CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
-
-fn cache_store() -> &'static Mutex<HashMap<String, CacheEntry>> {
-    STATIC_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cache_get(key: &str) -> Option<Vec<u8>> {
-    let mut map = cache_store().lock().ok()?;
-    if let Some(entry) = map.get(key) {
-        if Instant::now() <= entry.expires_at {
-            tracing::debug!(target: "migux::static_cache", cache_key = %key, layer = "memory", "Cache hit");
-            return Some(entry.response.clone());
-        }
-    }
-    map.remove(key);
-    None
-}
-
-fn cache_put(key: String, response: Vec<u8>, ttl: Duration) {
-    if ttl.as_secs() == 0 {
-        return;
-    }
-    let entry = CacheEntry {
-        response,
-        expires_at: Instant::now() + ttl,
-    };
-    if let Ok(mut map) = cache_store().lock() {
-        map.insert(key, entry);
-    }
-}
-
-async fn disk_cache_get(cache_dir: &str, key: &str) -> Option<Vec<u8>> {
-    let (data_path, meta_path) = cache_paths(cache_dir, key);
-    let meta_bytes = tokio::fs::read(&meta_path).await.ok()?;
-    let meta_str = std::str::from_utf8(&meta_bytes).ok()?.trim();
-    let expires_at = meta_str.parse::<u64>().ok()?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    if now > expires_at {
-        let _ = tokio::fs::remove_file(&data_path).await;
-        let _ = tokio::fs::remove_file(&meta_path).await;
-        return None;
-    }
-
-    let data = tokio::fs::read(&data_path).await.ok()?;
-    tracing::debug!(
-        target: "migux::static_cache",
-        cache_key = %key,
-        layer = "disk",
-        "Cache hit"
-    );
-    Some(data)
-}
-
-async fn disk_cache_put(cache_dir: &str, key: &str, response: &[u8], ttl: Duration) {
-    if ttl.as_secs() == 0 {
-        return;
-    }
-
-    if tokio::fs::create_dir_all(cache_dir).await.is_err() {
-        return;
-    }
-
-    let (data_path, meta_path) = cache_paths(cache_dir, key);
-    let expires_at = SystemTime::now()
-        .checked_add(ttl)
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let _ = tokio::fs::write(&data_path, response).await;
-    let _ = tokio::fs::write(&meta_path, expires_at.to_string()).await;
-}
-
-fn cache_paths(cache_dir: &str, key: &str) -> (PathBuf, PathBuf) {
-    let hash = cache_key_hash(key);
-    let mut data = PathBuf::from(cache_dir);
-    let mut meta = PathBuf::from(cache_dir);
-    data.push(format!("{:016x}.cache", hash));
-    meta.push(format!("{:016x}.meta", hash));
-    (data, meta)
-}
-
-fn cache_key_hash(key: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn build_response_bytes(
-    status: &str,
-    content_type: Option<&str>,
-    body: &[u8],
-    keep_alive: bool,
-) -> Vec<u8> {
-    let mut headers = String::new();
-
-    headers.push_str(&format!("HTTP/1.1 {}\r\n", status));
-    headers.push_str(&format!("Content-Length: {}\r\n", body.len()));
-
-    if let Some(ct) = content_type {
-        headers.push_str(&format!("Content-Type: {}\r\n", ct));
-    }
-
-    if keep_alive {
-        headers.push_str("Connection: keep-alive\r\n");
-    } else {
-        headers.push_str("Connection: close\r\n");
-    }
-    headers.push_str("\r\n");
-
-    let mut out = headers.into_bytes();
-    out.extend_from_slice(body);
-    out
-}
-
-fn build_404(keep_alive: bool) -> Vec<u8> {
-    let body = b"404 Not Found";
-    build_response_bytes("404 Not Found", Some("text/plain; charset=utf-8"), body, keep_alive)
-}
-
-fn build_500(keep_alive: bool) -> Vec<u8> {
-    let body = b"500 Internal Server Error";
-    build_response_bytes(
-        "500 Internal Server Error",
-        Some("text/plain; charset=utf-8"),
-        body,
-        keep_alive,
-    )
-}
-
+/// Serve a static file directly to the client stream.
 pub async fn serve_static(
     stream: &mut (impl AsyncWrite + Unpin),
     server_cfg: &ServerConfig,
@@ -157,6 +30,7 @@ pub async fn serve_static(
     Ok(())
 }
 
+/// Serve a static file using cache when enabled.
 pub async fn serve_static_cached(
     stream: &mut (impl AsyncWrite + Unpin),
     http_cfg: &HttpConfig,
@@ -175,6 +49,7 @@ pub async fn serve_static_cached(
     Ok(())
 }
 
+/// Read a static file and return a full HTTP response.
 pub async fn serve_static_bytes(
     server_cfg: &ServerConfig,
     location: &LocationConfig,
@@ -194,7 +69,7 @@ pub async fn serve_static_bytes(
 
     let file_path = format!("{}/{}", root, rel);
 
-    match fs::read(&file_path).await {
+    match tokio_fs::read(&file_path).await {
         Ok(body) => {
             let mime = mime_guess::from_path(&file_path).first_or_octet_stream();
 
@@ -211,6 +86,7 @@ pub async fn serve_static_bytes(
     }
 }
 
+/// Read a static file with cache support and return a full HTTP response.
 async fn serve_static_bytes_cached(
     http_cfg: &HttpConfig,
     server_cfg: &ServerConfig,
@@ -228,7 +104,7 @@ async fn serve_static_bytes_cached(
 
     let file_path = format!("{}/{}", root, rel);
 
-    let metadata = match fs::metadata(&file_path).await {
+    let metadata = match tokio_fs::metadata(&file_path).await {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(build_404(keep_alive)),
         Err(_) => return Ok(build_500(keep_alive)),
@@ -251,7 +127,7 @@ async fn serve_static_bytes_cached(
         return Ok(resp);
     }
 
-    let body = match fs::read(&file_path).await {
+    let body = match tokio_fs::read(&file_path).await {
         Ok(body) => body,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(build_404(keep_alive)),
         Err(_) => return Ok(build_500(keep_alive)),
@@ -319,39 +195,4 @@ async fn serve_static_bytes_cached(
     Ok(resp)
 }
 
-/// Resuelve la ruta relativa al root, teniendo en cuenta el index y el prefijo.
-fn resolve_relative_path(req_path: &str, location_path: &str, index: &str) -> Option<String> {
-    if req_path == "/" && location_path == "/" {
-        return Some(index.to_string());
-    }
-
-    if req_path == location_path {
-        return Some(index.to_string());
-    }
-
-    if req_path.starts_with(location_path) {
-        let mut tail = &req_path[location_path.len()..];
-
-        if tail.starts_with('/') {
-            tail = &tail[1..];
-        }
-
-        if tail.is_empty() {
-            Some(index.to_string())
-        } else {
-            Some(tail.to_string())
-        }
-    } else {
-        None
-    }
-}
-
-fn cache_enabled(http_cfg: &HttpConfig, location: &LocationConfig, method: &str) -> bool {
-    if method != "GET" {
-        return false;
-    }
-    if http_cfg.cache_dir.is_none() {
-        return false;
-    }
-    !matches!(location.cache, Some(false))
-}
+// Helpers are defined in the `cache` and `fs` modules.

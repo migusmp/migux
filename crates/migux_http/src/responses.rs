@@ -32,10 +32,12 @@ async fn send_text_response<W: AsyncWrite + Unpin + ?Sized>(
     send_response(stream, status, "text/plain; charset=utf-8", body.as_bytes()).await
 }
 
+/// Send a 404 Not Found response.
 pub async fn send_404<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(stream, "404 Not Found", "404 Not Found\n").await
 }
 
+/// Send a 501 Not Implemented response.
 pub async fn send_501<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(
         stream,
@@ -45,6 +47,7 @@ pub async fn send_501<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow:
     .await
 }
 
+/// Send a 500 Internal Server Error response.
 pub async fn send_500<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(
         stream,
@@ -54,26 +57,32 @@ pub async fn send_500<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow:
     .await
 }
 
+/// Send a 502 Bad Gateway response.
 pub async fn send_502<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(stream, "502 Bad Gateway", "502 Bad Gateway\n").await
 }
 
+/// Send a 405 Method Not Allowed response.
 pub async fn send_405<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(stream, "405 Method Not Allowed", "405 Method Not Allowed\n").await
 }
 
+/// Send a 400 Bad Request response.
 pub async fn send_400<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(stream, "400 Bad Request", "400 Bad Request\n").await
 }
 
+/// Send a 408 Request Timeout response.
 pub async fn send_408<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(stream, "408 Request Timeout", "408 Request Timeout\n").await
 }
 
+/// Send a 413 Payload Too Large response.
 pub async fn send_413<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(stream, "413 Payload Too Large", "413 Payload Too Large\n").await
 }
 
+/// Send a 431 Request Header Fields Too Large response.
 pub async fn send_431<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(
         stream,
@@ -83,6 +92,7 @@ pub async fn send_431<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow:
     .await
 }
 
+/// Send an HTTP 301 redirect.
 pub async fn send_redirect<W: AsyncWrite + Unpin + ?Sized>(
     stream: &mut W,
     location: &str,

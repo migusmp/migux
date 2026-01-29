@@ -1,3 +1,8 @@
+//! Per-connection HTTP/1 handler.
+//!
+//! Reads client requests, selects the matching server/location, and dispatches
+//! to static or proxy handlers while respecting keep-alive and timeouts.
+
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, BytesMut};

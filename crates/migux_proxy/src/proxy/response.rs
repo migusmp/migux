@@ -1,3 +1,8 @@
+//! Streaming and parsing of upstream HTTP/1 responses.
+//!
+//! Handles header parsing, chunked transfer decoding, and body forwarding
+//! while enforcing configured limits.
+
 use bytes::BytesMut;
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -5,7 +10,7 @@ use tokio::{
 };
 use tracing::{debug, instrument, warn};
 
-use super::PooledStream;
+use super::pool::PooledStream;
 
 /// =======================================================
 /// HTTP RESPONSE STREAMER
@@ -17,6 +22,8 @@ use super::PooledStream;
 ///   - chunked: parsea chunks y los forwardea
 ///   - content-length: forwardea exactamente CL bytes
 ///   - sin CL: read-to-EOF (no reusable)
+/// Stream an upstream HTTP response to the client and return whether the
+/// upstream connection is reusable.
 #[instrument(skip(upstream, client_stream))]
 pub(super) async fn stream_http_response<S>(
     upstream: &mut PooledStream,
@@ -106,6 +113,7 @@ fn find_headers_end(buf: &BytesMut) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+/// Parsed response metadata used to drive body handling.
 #[derive(Debug, Default)]
 struct ResponseInfo {
     content_length: Option<usize>,
@@ -116,6 +124,7 @@ struct ResponseInfo {
     status_code: Option<u16>,
 }
 
+/// Tracks Content-Length parsing state for duplicate header detection.
 #[derive(Default)]
 struct ContentLengthState {
     value: Option<usize>,
@@ -169,6 +178,7 @@ fn split_header_tokens(value: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
+/// Parse HTTP response headers and extract body/connection metadata.
 fn parse_response_headers(header_bytes: &[u8]) -> anyhow::Result<ResponseInfo> {
     let header_str = String::from_utf8_lossy(header_bytes);
     let mut info = ResponseInfo::default();

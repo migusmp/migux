@@ -370,6 +370,7 @@ async fn accept_loop(
         max_permits = semaphore.available_permits(),
     )
 )]
+/// Accept loop for TLS listeners; dispatches HTTP/2 via ALPN when enabled.
 async fn accept_loop_tls(
     listener: TcpListener,
     listen_addr: String,
@@ -517,6 +518,7 @@ async fn accept_loop_tls(
     }
 }
 
+/// Build a TLS acceptor from configured certificate/key paths.
 fn load_tls_acceptor(cfg: &TlsConfig) -> anyhow::Result<TlsAcceptor> {
     let certs = load_certs(&cfg.cert_path)?;
     let key = load_private_key(&cfg.key_path)?;
@@ -535,6 +537,7 @@ fn load_tls_acceptor(cfg: &TlsConfig) -> anyhow::Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+/// Load PEM-encoded certificates from disk.
 fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::Certificate>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -545,6 +548,7 @@ fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::Certificate>> {
     Ok(certs.into_iter().map(rustls::Certificate).collect())
 }
 
+/// Load a PEM-encoded private key (PKCS8 or RSA) from disk.
 fn load_private_key(path: &str) -> anyhow::Result<rustls::PrivateKey> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);

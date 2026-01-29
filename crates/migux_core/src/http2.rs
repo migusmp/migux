@@ -1,3 +1,10 @@
+//! HTTP/2 handling for client connections.
+//!
+//! This module terminates HTTP/2 at the edge and reuses the existing HTTP/1
+//! routing/handler pipeline by bridging each HTTP/2 request into an in-memory
+//! HTTP/1 exchange. It keeps behavior consistent across protocols while
+//! avoiding a full rewrite of the core request path.
+
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Context;
@@ -17,8 +24,10 @@ use crate::ServerRuntime;
 use migux_config::MiguxConfig;
 use migux_proxy::Proxy;
 
+/// Capacity of the in-memory duplex stream used to bridge HTTP/2 -> HTTP/1.
 const IN_MEMORY_STREAM_CAPACITY: usize = 64 * 1024;
 
+/// Serve a single HTTP/2 connection over an already-accepted TLS stream.
 pub async fn serve_h2_connection<S>(
     stream: S,
     client_addr: SocketAddr,
@@ -45,6 +54,7 @@ where
     Ok(())
 }
 
+/// Handle one HTTP/2 request by translating it to HTTP/1 and parsing the response.
 async fn handle_h2_request(
     req: Request<Incoming>,
     client_addr: SocketAddr,
@@ -107,6 +117,7 @@ async fn handle_h2_request(
     }
 }
 
+/// Build a minimal HTTP/1.1 request from HTTP/2 request parts and body.
 fn build_http1_request(parts: &http::request::Parts, body: &[u8]) -> Vec<u8> {
     let method = parts.method.as_str();
     let path = parts
@@ -148,6 +159,7 @@ fn build_http1_request(parts: &http::request::Parts, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Run the existing HTTP/1 pipeline using an in-memory duplex stream.
 async fn run_http1_pipeline(
     req_bytes: Vec<u8>,
     client_addr: SocketAddr,
@@ -183,6 +195,7 @@ async fn run_http1_pipeline(
     Ok(resp_bytes)
 }
 
+/// Parse a raw HTTP/1 response into status, headers, and body.
 fn parse_http1_response(
     bytes: &[u8],
 ) -> anyhow::Result<(StatusCode, HeaderMap, Vec<u8>)> {
@@ -250,6 +263,7 @@ fn parse_http1_response(
     Ok((status, header_map, body))
 }
 
+/// Decode an HTTP/1 chunked body into a contiguous buffer.
 fn decode_chunked(body: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut input = body;
@@ -287,10 +301,12 @@ fn decode_chunked(body: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Find the first CRLF in the input buffer.
 fn find_crlf(input: &[u8]) -> Option<usize> {
     input.windows(2).position(|w| w == b"\r\n")
 }
 
+/// Build a minimal HTTP/2 response with a fixed body.
 fn simple_h2_response(status: StatusCode, body: &'static [u8]) -> hyper::Response<Full<Bytes>> {
     let len = body.len().to_string();
     hyper::Response::builder()

@@ -51,8 +51,11 @@ pub struct HttpConfig {
     pub max_upstream_response_body_bytes: u64,
 
     // Caché control
+    /// Directory used for disk-backed static cache (optional).
     pub cache_dir: Option<String>,
+    /// Default TTL in seconds for cached static objects (optional).
     pub cache_default_ttl_secs: Option<u32>,
+    /// Maximum size in bytes for a cached static object (optional).
     pub cache_max_object_bytes: Option<u64>,
 }
 
@@ -109,11 +112,17 @@ impl Default for UpstreamConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+/// Health/circuit-breaker configuration for an upstream pool.
 pub struct UpstreamHealthConfig {
+    /// Failures before marking an upstream down.
     pub fail_threshold: u32,
+    /// Cooldown time in seconds before retrying a down node.
     pub cooldown_secs: u64,
+    /// Enable active TCP health checks.
     pub active: bool,
+    /// Interval for active checks in seconds.
     pub interval_secs: u64,
+    /// Timeout for active checks in seconds.
     pub timeout_secs: u64,
 }
 
@@ -168,11 +177,17 @@ impl Default for ServerConfig {
 // =======================================================
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+/// TLS listener configuration for a server.
 pub struct TlsConfig {
+    /// TLS listen address (host:port).
     pub listen: String,
+    /// Path to PEM-encoded certificate chain.
     pub cert_path: String,
+    /// Path to PEM-encoded private key.
     pub key_path: String,
+    /// Redirect HTTP -> HTTPS for this server.
     pub redirect_http: bool,
+    /// Enable HTTP/2 via ALPN on this TLS listener.
     pub http2: bool,
 }
 

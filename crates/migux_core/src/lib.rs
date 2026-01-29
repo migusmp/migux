@@ -10,6 +10,7 @@ pub mod types;
 pub mod worker;
 pub mod http2;
 
+/// Build a map of TCP listen address -> servers bound to that address.
 pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
     let mut map: ServersByListen = HashMap::new();
 
@@ -65,6 +66,7 @@ pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
     map
 }
 
+/// Build a map of TLS listen address -> servers bound to that address.
 pub fn build_tls_servers_by_listen(cfg: &MiguxConfig) -> TlsServersByListen {
     let mut map: TlsServersByListen = HashMap::new();
 

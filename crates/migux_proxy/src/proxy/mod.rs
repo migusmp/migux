@@ -2,24 +2,29 @@ use std::{
     net::SocketAddr,
     sync::atomic::AtomicUsize,
     sync::Arc,
-    time::Instant,
 };
 
 use bytes::{Buf, BytesMut};
 use dashmap::DashMap;
-use migux_config::{LocationConfig, MiguxConfig, UpstreamConfig};
+use migux_config::{LocationConfig, MiguxConfig};
 use migux_http::responses::send_502;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    time::{interval, timeout, Duration},
+    time::{timeout, Duration},
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument};
 
 mod headers;
+mod health;
 mod path;
+mod pool;
 mod response;
 mod upstream;
+
+use health::{health_policy, UpstreamHealth};
+use pool::connect_fresh;
+use pool::PooledStream;
 
 /// =======================================================
 /// PROXY STATE
@@ -42,33 +47,6 @@ pub struct Proxy {
     health: DashMap<String, UpstreamHealth>,
 }
 
-#[derive(Debug, Clone)]
-struct HealthPolicy {
-    fail_threshold: u32,
-    cooldown: Duration,
-}
-
-#[derive(Debug, Clone, Default)]
-struct UpstreamHealth {
-    failures: u32,
-    down_until: Option<Instant>,
-}
-
-pub(super) struct PooledStream {
-    stream: TcpStream,
-    read_buf: BytesMut,
-    last_used: Instant,
-}
-
-impl PooledStream {
-    fn new(stream: TcpStream) -> Self {
-        Self {
-            stream,
-            read_buf: BytesMut::new(),
-            last_used: Instant::now(),
-        }
-    }
-}
 
 impl Proxy {
     /// Crea una nueva instancia del proxy
@@ -82,155 +60,6 @@ impl Proxy {
             rr_counters: DashMap::new(),
             pools: DashMap::new(),
             health: DashMap::new(),
-        }
-    }
-
-    pub fn start_health_checks(self: &Arc<Self>, cfg: Arc<MiguxConfig>) {
-        for (upstream_name, upstream_cfg) in cfg.upstream.iter() {
-            if !upstream_cfg.health.active {
-                continue;
-            }
-
-            let servers = match upstream::normalize_servers(upstream_cfg) {
-                Ok(list) => list,
-                Err(err) => {
-                    warn!(
-                        target: "migux::proxy",
-                        upstream = %upstream_name,
-                        error = ?err,
-                        "Skipping health checks due to invalid upstream config"
-                    );
-                    continue;
-                }
-            };
-
-            let policy = health_policy(upstream_cfg);
-            let interval_secs = upstream_cfg.health.interval_secs.max(1);
-            let timeout_secs = upstream_cfg.health.timeout_secs.max(1);
-            let check_interval = Duration::from_secs(interval_secs);
-            let check_timeout = Duration::from_secs(timeout_secs);
-            let proxy = Arc::clone(self);
-            let upstream_name = upstream_name.clone();
-
-            tokio::spawn(async move {
-                let mut ticker = interval(check_interval);
-                loop {
-                    ticker.tick().await;
-                    for addr in &servers {
-                        let ok = connect_with_timeout(addr, check_timeout).await.is_ok();
-                        if ok {
-                            proxy.record_success(&upstream_name, addr);
-                        } else {
-                            proxy.record_failure(&upstream_name, addr, &policy);
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    /// Takes an upstream connection from the pool or creates a new one.
-    ///
-    /// Flujo:
-    /// - Intenta entry.pop() (LIFO) del pool para ese addr
-    /// - Si hay, (deberia) reutilizarlo
-    /// - Si no hay, conecta nuevo
-    #[instrument(skip(self))]
-    async fn checkout_upstream_stream(
-        &self,
-        addr: &str,
-        connect_timeout: Duration,
-        idle_ttl: Duration,
-    ) -> anyhow::Result<PooledStream> {
-        // Intenta sacar uno del pool
-        if let Some(mut entry) = self.pools.get_mut(addr)
-        {
-            while let Some(pooled) = entry.pop() {
-                if idle_ttl.is_zero() || pooled.last_used.elapsed() <= idle_ttl {
-                    debug!(target: "migux::proxy", upstream = %addr, "Reusing pooled upstream connection");
-                    return Ok(pooled);
-                }
-                debug!(target: "migux::proxy", upstream = %addr, "Dropping idle pooled connection");
-            }
-        }
-
-        info!(target: "migux::proxy", upstream = %addr, "Creating new upstream connection");
-        let stream = connect_with_timeout(addr, connect_timeout).await?;
-        Ok(PooledStream::new(stream))
-    }
-
-    /// Returns an upstream connection back to the pool so it can be reused.
-    ///
-    /// Solo se llama si el streamer decide que la conexion es reusable.
-    fn checkin_upstream_stream(&self, addr: &str, mut pooled: PooledStream, max_pool: usize) {
-        pooled.last_used = Instant::now();
-        let mut entry = self.pools.entry(addr.to_string()).or_insert_with(Vec::new);
-        if entry.len() >= max_pool {
-            debug!(target: "migux::proxy", upstream = %addr, "Pool full; dropping connection");
-            return;
-        }
-        entry.push(pooled);
-
-        debug!(target: "migux::proxy", upstream = %addr, "Returned upstream connection to pool");
-    }
-
-    fn filter_healthy_addrs(
-        &self,
-        upstream_name: &str,
-        addrs: Vec<String>,
-    ) -> Vec<String> {
-        let now = Instant::now();
-        let mut healthy = Vec::new();
-        for addr in &addrs {
-            if self.is_healthy(upstream_name, addr, now) {
-                healthy.push(addr.clone());
-            }
-        }
-        if healthy.is_empty() {
-            addrs
-        } else {
-            healthy
-        }
-    }
-
-    fn is_healthy(&self, upstream_name: &str, addr: &str, now: Instant) -> bool {
-        let key = health_key(upstream_name, addr);
-        if let Some(mut entry) = self.health.get_mut(&key) {
-            if let Some(until) = entry.down_until {
-                if until > now {
-                    return false;
-                }
-                entry.down_until = None;
-                entry.failures = 0;
-            }
-        }
-        true
-    }
-
-    fn record_failure(&self, upstream_name: &str, addr: &str, policy: &HealthPolicy) {
-        let key = health_key(upstream_name, addr);
-        let mut entry = self
-            .health
-            .entry(key)
-            .or_insert_with(UpstreamHealth::default);
-        entry.failures = entry.failures.saturating_add(1);
-        let threshold = policy.fail_threshold.max(1);
-        if entry.failures >= threshold {
-            entry.down_until = Some(Instant::now() + policy.cooldown);
-            debug!(
-                target: "migux::proxy",
-                upstream = %upstream_name,
-                addr = %addr,
-                "Marking upstream as down"
-            );
-        }
-    }
-
-    fn record_success(&self, upstream_name: &str, addr: &str) {
-        let key = health_key(upstream_name, addr);
-        if let Some(mut entry) = self.health.get_mut(&key) {
-            entry.failures = 0;
-            entry.down_until = None;
         }
     }
 
@@ -711,84 +540,4 @@ impl Default for Proxy {
     }
 }
 
-fn health_key(upstream_name: &str, addr: &str) -> String {
-    format!("{upstream_name}|{addr}")
-}
-
-fn health_policy(cfg: &UpstreamConfig) -> HealthPolicy {
-    let threshold = cfg.health.fail_threshold.max(1);
-    let cooldown_secs = cfg.health.cooldown_secs;
-    HealthPolicy {
-        fail_threshold: threshold,
-        cooldown: Duration::from_secs(cooldown_secs),
-    }
-}
-
-/// Crea una conexion nueva (fresh) a un upstream.
-/// Se usa como fallback si una conexion reutilizada estaba muerta.
-async fn connect_fresh(addr: &str, timeout_dur: Duration) -> anyhow::Result<PooledStream> {
-    let stream = connect_with_timeout(addr, timeout_dur).await?;
-    Ok(PooledStream::new(stream))
-}
-
-async fn connect_with_timeout(addr: &str, timeout_dur: Duration) -> anyhow::Result<TcpStream> {
-    match timeout(timeout_dur, TcpStream::connect(addr)).await {
-        Ok(res) => Ok(res?),
-        Err(_) => anyhow::bail!("Upstream connect timeout to {}", addr),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{health_key, HealthPolicy, Proxy, UpstreamHealth};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn filter_healthy_addrs_skips_down_nodes() {
-        let proxy = Proxy::new();
-        let policy = HealthPolicy {
-            fail_threshold: 1,
-            cooldown: Duration::from_secs(60),
-        };
-        proxy.record_failure("api", "127.0.0.1:3000", &policy);
-        let addrs = vec![
-            "127.0.0.1:3000".to_string(),
-            "127.0.0.1:3001".to_string(),
-        ];
-        let filtered = proxy.filter_healthy_addrs("api", addrs);
-        assert_eq!(filtered, vec!["127.0.0.1:3001".to_string()]);
-    }
-
-    #[test]
-    fn filter_healthy_addrs_falls_back_when_all_down() {
-        let proxy = Proxy::new();
-        let policy = HealthPolicy {
-            fail_threshold: 1,
-            cooldown: Duration::from_secs(60),
-        };
-        proxy.record_failure("api", "127.0.0.1:3000", &policy);
-        proxy.record_failure("api", "127.0.0.1:3001", &policy);
-        let addrs = vec![
-            "127.0.0.1:3000".to_string(),
-            "127.0.0.1:3001".to_string(),
-        ];
-        let filtered = proxy.filter_healthy_addrs("api", addrs.clone());
-        assert_eq!(filtered, addrs);
-    }
-
-    #[test]
-    fn filter_healthy_addrs_recovers_after_cooldown() {
-        let proxy = Proxy::new();
-        let key = health_key("api", "127.0.0.1:3000");
-        proxy.health.insert(
-            key,
-            UpstreamHealth {
-                failures: 1,
-                down_until: Some(Instant::now() - Duration::from_secs(1)),
-            },
-        );
-        let addrs = vec!["127.0.0.1:3000".to_string()];
-        let filtered = proxy.filter_healthy_addrs("api", addrs);
-        assert_eq!(filtered, vec!["127.0.0.1:3000".to_string()]);
-    }
-}
+// Health and pooling helpers live in their respective modules.
