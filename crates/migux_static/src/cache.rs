@@ -146,9 +146,9 @@ impl CachePolicy {
         if method != "GET" {
             return false;
         }
-        if http_cfg.cache_dir.is_none() {
+        if http_cfg.cache_dir().is_none() {
             return false;
         }
-        !matches!(location.cache, Some(false))
+        !matches!(location.cache(), Some(false))
     }
 }

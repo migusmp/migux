@@ -61,8 +61,8 @@ impl<'a> StaticService<'a> {
     }
 
     async fn serve_bytes(&self, req_path: &str, keep_alive: bool) -> anyhow::Result<Vec<u8>> {
-        let root = self.location.root.as_deref().unwrap_or(&self.server_cfg.root);
-        let index = self.location.index.as_deref().unwrap_or(&self.server_cfg.index);
+        let root = self.location.root_or(self.server_cfg.root());
+        let index = self.location.index_or(self.server_cfg.index());
 
         // Resolver path relativo dentro de `root`
         let rel = PathResolver::resolve_relative_path(req_path, &self.location.path, index);
@@ -104,8 +104,8 @@ impl<'a> StaticService<'a> {
         req_path: &str,
         keep_alive: bool,
     ) -> anyhow::Result<Vec<u8>> {
-        let root = self.location.root.as_deref().unwrap_or(&self.server_cfg.root);
-        let index = self.location.index.as_deref().unwrap_or(&self.server_cfg.index);
+        let root = self.location.root_or(self.server_cfg.root());
+        let index = self.location.index_or(self.server_cfg.index());
 
         let rel = PathResolver::resolve_relative_path(req_path, &self.location.path, index);
         let Some(rel) = rel else {
@@ -147,11 +147,11 @@ impl<'a> StaticService<'a> {
             Err(_) => return Ok(ResponseBuilder::internal_error(keep_alive)),
         };
 
-        let max_obj = http_cfg.cache_max_object_bytes.unwrap_or(0);
-        let ttl_secs = http_cfg.cache_default_ttl_secs.unwrap_or(0) as u64;
+        let max_obj = http_cfg.cache_max_object_bytes().unwrap_or(0);
+        let ttl_secs = http_cfg.cache_default_ttl_secs().unwrap_or(0) as u64;
         let ttl = Duration::from_secs(ttl_secs);
 
-        if let Some(cache_dir) = http_cfg.cache_dir.as_deref() {
+        if let Some(cache_dir) = http_cfg.cache_dir() {
             let disk_cache = DiskCache::new(cache_dir);
             if let Some(resp) = disk_cache.get(&key).await {
                 if ttl_secs > 0 {
@@ -174,7 +174,7 @@ impl<'a> StaticService<'a> {
 
         if max_obj > 0 && (body.len() as u64) <= max_obj && ttl_secs > 0 {
             MemoryCache::put(key.clone(), resp.clone(), ttl);
-            if let Some(cache_dir) = http_cfg.cache_dir.as_deref() {
+            if let Some(cache_dir) = http_cfg.cache_dir() {
                 DiskCache::new(cache_dir).put(&key, &resp, ttl).await;
             }
             tracing::debug!(
