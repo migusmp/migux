@@ -103,7 +103,12 @@ fn cache_key_hash(key: &str) -> u64 {
     hasher.finish()
 }
 
-fn build_response_bytes(status: &str, content_type: Option<&str>, body: &[u8]) -> Vec<u8> {
+fn build_response_bytes(
+    status: &str,
+    content_type: Option<&str>,
+    body: &[u8],
+    keep_alive: bool,
+) -> Vec<u8> {
     let mut headers = String::new();
 
     headers.push_str(&format!("HTTP/1.1 {}\r\n", status));
@@ -113,8 +118,11 @@ fn build_response_bytes(status: &str, content_type: Option<&str>, body: &[u8]) -
         headers.push_str(&format!("Content-Type: {}\r\n", ct));
     }
 
-    // básico (luego le metes keep-alive si quieres)
-    headers.push_str("Connection: close\r\n");
+    if keep_alive {
+        headers.push_str("Connection: keep-alive\r\n");
+    } else {
+        headers.push_str("Connection: close\r\n");
+    }
     headers.push_str("\r\n");
 
     let mut out = headers.into_bytes();
@@ -122,17 +130,18 @@ fn build_response_bytes(status: &str, content_type: Option<&str>, body: &[u8]) -
     out
 }
 
-fn build_404() -> Vec<u8> {
+fn build_404(keep_alive: bool) -> Vec<u8> {
     let body = b"404 Not Found";
-    build_response_bytes("404 Not Found", Some("text/plain; charset=utf-8"), body)
+    build_response_bytes("404 Not Found", Some("text/plain; charset=utf-8"), body, keep_alive)
 }
 
-fn build_500() -> Vec<u8> {
+fn build_500(keep_alive: bool) -> Vec<u8> {
     let body = b"500 Internal Server Error";
     build_response_bytes(
         "500 Internal Server Error",
         Some("text/plain; charset=utf-8"),
         body,
+        keep_alive,
     )
 }
 
@@ -141,8 +150,9 @@ pub async fn serve_static(
     server_cfg: &ServerConfig,
     location: &LocationConfig,
     req_path: &str,
+    keep_alive: bool,
 ) -> anyhow::Result<()> {
-    let resp = serve_static_bytes(server_cfg, location, req_path).await?;
+    let resp = serve_static_bytes(server_cfg, location, req_path, keep_alive).await?;
     stream.write_all(&resp).await?;
     Ok(())
 }
@@ -154,12 +164,13 @@ pub async fn serve_static_cached(
     location: &LocationConfig,
     method: &str,
     req_path: &str,
+    keep_alive: bool,
 ) -> anyhow::Result<()> {
     if !cache_enabled(http_cfg, location, method) {
-        return serve_static(stream, server_cfg, location, req_path).await;
+        return serve_static(stream, server_cfg, location, req_path, keep_alive).await;
     }
 
-    let resp = serve_static_bytes_cached(http_cfg, server_cfg, location, req_path).await?;
+    let resp = serve_static_bytes_cached(http_cfg, server_cfg, location, req_path, keep_alive).await?;
     stream.write_all(&resp).await?;
     Ok(())
 }
@@ -168,6 +179,7 @@ pub async fn serve_static_bytes(
     server_cfg: &ServerConfig,
     location: &LocationConfig,
     req_path: &str,
+    keep_alive: bool,
 ) -> anyhow::Result<Vec<u8>> {
     let root = location.root.as_deref().unwrap_or(&server_cfg.root);
     let index = location.index.as_deref().unwrap_or(&server_cfg.index);
@@ -177,7 +189,7 @@ pub async fn serve_static_bytes(
 
     // Si no matchea realmente esa location → 404
     let Some(rel) = rel else {
-        return Ok(build_404());
+        return Ok(build_404(keep_alive));
     };
 
     let file_path = format!("{}/{}", root, rel);
@@ -192,10 +204,10 @@ pub async fn serve_static_bytes(
                 mime.essence_str().to_string()
             };
 
-            Ok(build_response_bytes("200 OK", Some(&content_type), &body))
+            Ok(build_response_bytes("200 OK", Some(&content_type), &body, keep_alive))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(build_404()),
-        Err(_) => Ok(build_500()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(build_404(keep_alive)),
+        Err(_) => Ok(build_500(keep_alive)),
     }
 }
 
@@ -204,25 +216,26 @@ async fn serve_static_bytes_cached(
     server_cfg: &ServerConfig,
     location: &LocationConfig,
     req_path: &str,
+    keep_alive: bool,
 ) -> anyhow::Result<Vec<u8>> {
     let root = location.root.as_deref().unwrap_or(&server_cfg.root);
     let index = location.index.as_deref().unwrap_or(&server_cfg.index);
 
     let rel = resolve_relative_path(req_path, &location.path, index);
     let Some(rel) = rel else {
-        return Ok(build_404());
+        return Ok(build_404(keep_alive));
     };
 
     let file_path = format!("{}/{}", root, rel);
 
     let metadata = match fs::metadata(&file_path).await {
         Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(build_404()),
-        Err(_) => return Ok(build_500()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(build_404(keep_alive)),
+        Err(_) => return Ok(build_500(keep_alive)),
     };
 
     if !metadata.is_file() {
-        return Ok(build_404());
+        return Ok(build_404(keep_alive));
     }
 
     let mtime_key = metadata
@@ -240,8 +253,8 @@ async fn serve_static_bytes_cached(
 
     let body = match fs::read(&file_path).await {
         Ok(body) => body,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(build_404()),
-        Err(_) => return Ok(build_500()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(build_404(keep_alive)),
+        Err(_) => return Ok(build_500(keep_alive)),
     };
 
     let max_obj = http_cfg.cache_max_object_bytes.unwrap_or(0);
@@ -266,7 +279,7 @@ async fn serve_static_bytes_cached(
         mime.essence_str().to_string()
     };
 
-    let resp = build_response_bytes("200 OK", Some(&content_type), &body);
+    let resp = build_response_bytes("200 OK", Some(&content_type), &body, keep_alive);
 
     if max_obj > 0 && (body.len() as u64) <= max_obj && ttl_secs > 0 {
         cache_put(key.clone(), resp.clone(), ttl);

@@ -112,7 +112,7 @@ pub async fn handle_connection(
             "Matched location"
         );
 
-        let mut close_after = req.close_after;
+        let close_after = req.close_after;
 
         // Drop headers from buffer; keep body/leftovers for streaming or next request.
         if req.body_start > 0 {
@@ -138,6 +138,7 @@ pub async fn handle_connection(
                     "Serving static file"
                 );
 
+                let keep_alive = !close_after;
                 serve_static_cached(
                     &mut stream,
                     &cfg.http,
@@ -145,9 +146,9 @@ pub async fn handle_connection(
                     location,
                     method,
                     path,
+                    keep_alive,
                 )
                 .await?;
-                close_after = true;
 
                 // Discard request body (if any) so keep-alive doesn't break.
                 if req.is_chunked {
