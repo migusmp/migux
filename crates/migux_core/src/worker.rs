@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, BytesMut};
-use migux_http::responses::{send_400, send_404, send_408, send_413, send_431};
+use migux_http::responses::{send_404, send_408, send_413, send_431};
 use migux_proxy::Proxy;
 use migux_static::serve_static;
 use tokio::{
@@ -98,6 +98,11 @@ pub async fn handle_connection(
 
         let mut close_after = req.close_after;
 
+        // Drop headers from buffer; keep body/leftovers for streaming or next request.
+        if req.body_start > 0 {
+            buf.advance(req.body_start);
+        }
+
         // 5) Dispatch according to location type
         match location.r#type {
             LocationType::Static => {
@@ -122,6 +127,25 @@ pub async fn handle_connection(
                 //     .await?;
                 serve_static(&mut stream, &server.config, location, path).await?;
                 close_after = true;
+
+                // Discard request body (if any) so keep-alive doesn't break.
+                if req.is_chunked {
+                    let _ = discard_chunked_body(
+                        &mut stream,
+                        &mut buf,
+                        Duration::from_secs(cfg.http.client_read_timeout_secs),
+                        cfg.http.max_request_body_bytes as usize,
+                    )
+                    .await;
+                } else if req.content_length > 0 {
+                    let _ = discard_content_length(
+                        &mut stream,
+                        &mut buf,
+                        req.content_length,
+                        Duration::from_secs(cfg.http.client_read_timeout_secs),
+                    )
+                    .await;
+                }
             }
 
             LocationType::Proxy => {
@@ -134,10 +158,14 @@ pub async fn handle_connection(
                 proxy
                     .serve(
                         &mut stream,
+                        &mut buf,
                         location,
-                        path,
                         &req.headers,
-                        &req.body,
+                        method,
+                        path,
+                        &req.http_version,
+                        req.content_length,
+                        req.is_chunked,
                         &cfg,
                         &client_addr,
                     )
@@ -169,10 +197,13 @@ pub async fn handle_connection(
 #[derive(Debug)]
 struct ParsedRequest {
     headers: String,
-    body: Vec<u8>,
     method: String,
     path: String,
+    http_version: String,
+    content_length: usize,
+    is_chunked: bool,
     close_after: bool,
+    body_start: usize,
 }
 
 #[instrument(skip(stream, buf, http), fields())]
@@ -219,7 +250,7 @@ async fn read_http_request(
         "Parsed HTTP headers"
     );
 
-    let (method, path, _http_version, content_length, close_after, is_chunked) =
+    let (method, path, http_version, content_length, close_after, is_chunked) =
         parse_request_metadata(&headers_str);
 
     if is_chunked && content_length > 0 {
@@ -242,46 +273,15 @@ async fn read_http_request(
         );
     }
 
-    let body = if is_chunked {
-        match read_chunked_body(stream, buf, headers_end + 4, read_timeout, max_body).await {
-            Ok(body) => body,
-            Err(ChunkedBodyError::Timeout) => {
-                send_408(stream).await?;
-                return Ok(None);
-            }
-            Err(ChunkedBodyError::TooLarge) => {
-                send_413(stream).await?;
-                return Ok(None);
-            }
-            Err(ChunkedBodyError::Invalid) => {
-                send_400(stream).await?;
-                return Ok(None);
-            }
-            Err(ChunkedBodyError::Io(e)) => return Err(e),
-        }
-    } else {
-        let total_len = headers_end + 4 + content_length;
-        while buf.len() < total_len {
-            match read_more(stream, buf, read_timeout).await? {
-                ReadOutcome::Timeout => {
-                    send_408(stream).await?;
-                    return Ok(None);
-                }
-                ReadOutcome::Read(0) => return Ok(None),
-                ReadOutcome::Read(_) => {}
-            }
-        }
-
-        let req_bytes = buf.split_to(total_len);
-        req_bytes[headers_end + 4..].to_vec()
-    };
-
     Ok(Some(ParsedRequest {
         headers: headers_str,
-        body,
         method,
         path,
+        http_version,
+        content_length,
+        is_chunked,
         close_after,
+        body_start: headers_end + 4,
     }))
 }
 
@@ -361,31 +361,20 @@ enum ChunkedBodyError {
     Timeout,
     Invalid,
     TooLarge,
-    Io(anyhow::Error),
+    Io,
 }
 
-async fn read_chunked_body(
+async fn discard_chunked_body(
     stream: &mut TcpStream,
     buf: &mut BytesMut,
-    mut pos: usize,
     read_timeout: Duration,
     max_body: usize,
-) -> Result<Vec<u8>, ChunkedBodyError> {
-    let mut body = Vec::new();
+) -> Result<(), ChunkedBodyError> {
+    let mut body_bytes = 0usize;
 
     loop {
-        let line_end = match read_line_end(stream, buf, pos, read_timeout).await {
-            Ok(end) => end,
-            Err(ChunkedBodyError::Invalid) => return Err(ChunkedBodyError::Invalid),
-            Err(ChunkedBodyError::Timeout) => return Err(ChunkedBodyError::Timeout),
-            Err(ChunkedBodyError::Io(e)) => return Err(ChunkedBodyError::Io(e)),
-            Err(ChunkedBodyError::TooLarge) => return Err(ChunkedBodyError::TooLarge),
-        };
-
-        let line = &buf[pos..line_end];
-        pos = line_end + 2;
-
-        let size_str = match std::str::from_utf8(line) {
+        let line = read_line_bytes(stream, buf, read_timeout).await?;
+        let size_str = match std::str::from_utf8(&line[..line.len() - 2]) {
             Ok(s) => s.split(';').next().unwrap_or("").trim(),
             Err(_) => return Err(ChunkedBodyError::Invalid),
         };
@@ -393,48 +382,37 @@ async fn read_chunked_body(
             .map_err(|_| ChunkedBodyError::Invalid)?;
 
         if chunk_size == 0 {
-            // Consume trailers until empty line
             loop {
-                let end = read_line_end(stream, buf, pos, read_timeout).await?;
-                if end == pos {
-                    pos = end + 2;
-                    break;
+                let trailer = read_line_bytes(stream, buf, read_timeout).await?;
+                if trailer == b"\r\n" {
+                    return Ok(());
                 }
-                pos = end + 2;
             }
-            break;
         }
 
-        if max_body > 0 && body.len() + chunk_size > max_body {
+        body_bytes = body_bytes.saturating_add(chunk_size);
+        if max_body > 0 && body_bytes > max_body {
             return Err(ChunkedBodyError::TooLarge);
         }
 
-        ensure_available(stream, buf, pos + chunk_size + 2, read_timeout).await?;
-
-        body.extend_from_slice(&buf[pos..pos + chunk_size]);
-        pos += chunk_size;
-
-        if &buf[pos..pos + 2] != b"\r\n" {
-            return Err(ChunkedBodyError::Invalid);
-        }
-        pos += 2;
+        discard_exact(stream, buf, chunk_size + 2, read_timeout).await?;
     }
-
-    buf.advance(pos);
-    Ok(body)
 }
 
-async fn read_line_end(
+async fn read_line_bytes(
     stream: &mut TcpStream,
     buf: &mut BytesMut,
-    start: usize,
     read_timeout: Duration,
-) -> Result<usize, ChunkedBodyError> {
+) -> Result<Vec<u8>, ChunkedBodyError> {
     loop {
-        if let Some(end) = find_crlf(buf, start) {
-            return Ok(end);
+        if let Some(end) = find_crlf(buf, 0) {
+            let line = buf.split_to(end + 2);
+            return Ok(line.to_vec());
         }
-        match read_more(stream, buf, read_timeout).await.map_err(ChunkedBodyError::Io)? {
+        match read_more(stream, buf, read_timeout)
+            .await
+            .map_err(|_| ChunkedBodyError::Io)?
+        {
             ReadOutcome::Timeout => return Err(ChunkedBodyError::Timeout),
             ReadOutcome::Read(0) => return Err(ChunkedBodyError::Invalid),
             ReadOutcome::Read(_) => {}
@@ -442,14 +420,48 @@ async fn read_line_end(
     }
 }
 
-async fn ensure_available(
+async fn discard_exact(
     stream: &mut TcpStream,
     buf: &mut BytesMut,
-    needed: usize,
+    mut remaining: usize,
     read_timeout: Duration,
 ) -> Result<(), ChunkedBodyError> {
-    while buf.len() < needed {
-        match read_more(stream, buf, read_timeout).await.map_err(ChunkedBodyError::Io)? {
+    while remaining > 0 {
+        if !buf.is_empty() {
+            let take = remaining.min(buf.len());
+            buf.advance(take);
+            remaining -= take;
+            continue;
+        }
+        match read_more(stream, buf, read_timeout)
+            .await
+            .map_err(|_| ChunkedBodyError::Io)?
+        {
+            ReadOutcome::Timeout => return Err(ChunkedBodyError::Timeout),
+            ReadOutcome::Read(0) => return Err(ChunkedBodyError::Invalid),
+            ReadOutcome::Read(_) => {}
+        }
+    }
+    Ok(())
+}
+
+async fn discard_content_length(
+    stream: &mut TcpStream,
+    buf: &mut BytesMut,
+    mut remaining: usize,
+    read_timeout: Duration,
+) -> Result<(), ChunkedBodyError> {
+    while remaining > 0 {
+        if !buf.is_empty() {
+            let take = remaining.min(buf.len());
+            buf.advance(take);
+            remaining -= take;
+            continue;
+        }
+        match read_more(stream, buf, read_timeout)
+            .await
+            .map_err(|_| ChunkedBodyError::Io)?
+        {
             ReadOutcome::Timeout => return Err(ChunkedBodyError::Timeout),
             ReadOutcome::Read(0) => return Err(ChunkedBodyError::Invalid),
             ReadOutcome::Read(_) => {}

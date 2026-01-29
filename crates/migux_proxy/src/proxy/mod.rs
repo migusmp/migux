@@ -1,15 +1,15 @@
 use std::{net::SocketAddr, sync::atomic::AtomicUsize, sync::Arc};
 
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use dashmap::DashMap;
 use migux_config::{LocationConfig, MiguxConfig};
-use migux_http::responses::{send_404, send_502};
+use migux_http::responses::send_502;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     time::{timeout, Duration},
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument};
 
 mod headers;
 mod path;
@@ -110,16 +110,20 @@ impl Proxy {
     /// - la escribe al cliente
     /// - si reusable, devuelve conexion a pool
     #[instrument(
-        skip(self, client_stream, location, req_headers, req_body, cfg),
+        skip(self, client_stream, client_buf, location, req_headers, cfg),
         fields(client = %client_addr, location_path = %location.path)
     )]
     pub async fn serve(
         &self,
         client_stream: &mut TcpStream,
+        client_buf: &mut BytesMut,
         location: &LocationConfig,
-        req_path: &str,
         req_headers: &str,
-        req_body: &[u8],
+        method: &str,
+        req_path: &str,
+        http_version: &str,
+        content_length: usize,
+        is_chunked: bool,
         cfg: &Arc<MiguxConfig>,
         client_addr: &SocketAddr,
     ) -> anyhow::Result<()> {
@@ -145,27 +149,12 @@ impl Proxy {
         let connect_timeout = Duration::from_secs(cfg.http.proxy_connect_timeout_secs);
         let write_timeout = Duration::from_secs(cfg.http.proxy_write_timeout_secs);
         let read_timeout = Duration::from_secs(cfg.http.proxy_read_timeout_secs);
+        let client_read_timeout = Duration::from_secs(cfg.http.client_read_timeout_secs);
         let max_resp_headers = cfg.http.max_upstream_response_headers_bytes as usize;
         let max_resp_body = cfg.http.max_upstream_response_body_bytes as usize;
 
         // 4) strip_prefix para upstream path
         let upstream_path = path::strip_prefix_path(req_path, &location.path);
-
-        // 5) parse request line del cliente
-        let mut lines = req_headers.lines();
-        let first_line = match lines.next() {
-            Some(l) => l,
-            None => {
-                warn!(target: "migux::proxy", "Missing request line; returning 404");
-                send_404(client_stream).await?;
-                return Ok(());
-            }
-        };
-
-        let mut parts = first_line.split_whitespace();
-        let method = parts.next().unwrap_or("GET");
-        let _old_path = parts.next().unwrap_or("/");
-        let http_version = parts.next().unwrap_or("HTTP/1.1");
 
         debug!(
             target: "migux::proxy",
@@ -179,8 +168,13 @@ impl Proxy {
 
         // 6) reescribir headers para upstream
         let keep_alive = http_version != "HTTP/1.0";
-        let rest_of_headers =
-            headers::rewrite_proxy_headers(req_headers, &client_ip, keep_alive, req_body.len());
+        let rest_of_headers = headers::rewrite_proxy_headers(
+            req_headers,
+            &client_ip,
+            keep_alive,
+            content_length,
+            is_chunked,
+        );
 
         // 7) construir request completa (start line + headers + blank line + body)
         let mut out = Vec::new();
@@ -188,7 +182,6 @@ impl Proxy {
         out.extend_from_slice(start_line.as_bytes());
         out.extend_from_slice(rest_of_headers.as_bytes());
         out.extend_from_slice(b"\r\n");
-        out.extend_from_slice(req_body);
 
         let mut last_err: Option<anyhow::Error> = None;
 
@@ -322,7 +315,19 @@ impl Proxy {
                 }
             }
 
-            // 8.3) leer respuesta del upstream y streamear al cliente
+            // 8.3) stream request body to upstream (if any)
+            stream_request_body(
+                client_stream,
+                client_buf,
+                &mut upstream_stream.stream,
+                is_chunked,
+                content_length,
+                client_read_timeout,
+                cfg.http.max_request_body_bytes as usize,
+            )
+            .await?;
+
+            // 8.4) leer respuesta del upstream y streamear al cliente
             let reusable = match response::stream_http_response(
                 &mut upstream_stream,
                 client_stream,
@@ -365,6 +370,166 @@ impl Proxy {
         send_502(client_stream).await?;
         Ok(())
     }
+}
+
+async fn stream_request_body(
+    client_stream: &mut TcpStream,
+    client_buf: &mut BytesMut,
+    upstream_stream: &mut TcpStream,
+    is_chunked: bool,
+    content_length: usize,
+    read_timeout: Duration,
+    max_body: usize,
+) -> anyhow::Result<()> {
+    if is_chunked {
+        stream_chunked_body(
+            client_stream,
+            client_buf,
+            upstream_stream,
+            read_timeout,
+            max_body,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if content_length == 0 {
+        return Ok(());
+    }
+
+    if max_body > 0 && content_length > max_body {
+        anyhow::bail!("Client request body too large");
+    }
+
+    stream_exact(
+        client_stream,
+        client_buf,
+        upstream_stream,
+        content_length,
+        read_timeout,
+    )
+    .await
+}
+
+async fn stream_chunked_body(
+    client_stream: &mut TcpStream,
+    client_buf: &mut BytesMut,
+    upstream_stream: &mut TcpStream,
+    read_timeout: Duration,
+    max_body: usize,
+) -> anyhow::Result<()> {
+    let mut body_bytes = 0usize;
+
+    loop {
+        let line = read_line_bytes(client_stream, client_buf, read_timeout).await?;
+        upstream_stream.write_all(&line).await?;
+
+        let line_str = String::from_utf8_lossy(&line);
+        let size_str = line_str.trim().trim_end_matches('\r').trim_end_matches('\n');
+        let size_str = size_str.split(';').next().unwrap_or("").trim();
+        let chunk_size = usize::from_str_radix(size_str, 16)
+            .map_err(|_| anyhow::anyhow!("Invalid chunk size"))?;
+
+        if chunk_size == 0 {
+            loop {
+                let trailer = read_line_bytes(client_stream, client_buf, read_timeout).await?;
+                upstream_stream.write_all(&trailer).await?;
+                if trailer == b"\r\n" {
+                    return Ok(());
+                }
+            }
+        }
+
+        if max_body > 0 && body_bytes + chunk_size > max_body {
+            anyhow::bail!("Client request body too large");
+        }
+
+        stream_exact(
+            client_stream,
+            client_buf,
+            upstream_stream,
+            chunk_size + 2,
+            read_timeout,
+        )
+        .await?;
+
+        body_bytes += chunk_size;
+    }
+}
+
+async fn read_line_bytes(
+    client_stream: &mut TcpStream,
+    client_buf: &mut BytesMut,
+    read_timeout: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    loop {
+        if let Some(end) = find_crlf(client_buf, 0) {
+            let line = client_buf.split_to(end + 2);
+            return Ok(line.to_vec());
+        }
+        read_more_client(client_stream, client_buf, read_timeout).await?;
+    }
+}
+
+async fn stream_exact(
+    client_stream: &mut TcpStream,
+    client_buf: &mut BytesMut,
+    upstream_stream: &mut TcpStream,
+    mut remaining: usize,
+    read_timeout: Duration,
+) -> anyhow::Result<()> {
+    while remaining > 0 {
+        if !client_buf.is_empty() {
+            let take = remaining.min(client_buf.len());
+            upstream_stream.write_all(&client_buf[..take]).await?;
+            client_buf.advance(take);
+            remaining -= take;
+            continue;
+        }
+
+        let mut tmp = [0u8; 4096];
+        let n = match timeout(read_timeout, client_stream.read(&mut tmp)).await {
+            Ok(res) => res?,
+            Err(_) => anyhow::bail!("Client read timeout"),
+        };
+        if n == 0 {
+            anyhow::bail!("Client closed connection while streaming body");
+        }
+
+        if n > remaining {
+            upstream_stream.write_all(&tmp[..remaining]).await?;
+            client_buf.extend_from_slice(&tmp[remaining..n]);
+            remaining = 0;
+        } else {
+            upstream_stream.write_all(&tmp[..n]).await?;
+            remaining -= n;
+        }
+    }
+    Ok(())
+}
+
+async fn read_more_client(
+    client_stream: &mut TcpStream,
+    client_buf: &mut BytesMut,
+    read_timeout: Duration,
+) -> anyhow::Result<()> {
+    let mut tmp = [0u8; 4096];
+    let n = match timeout(read_timeout, client_stream.read(&mut tmp)).await {
+        Ok(res) => res?,
+        Err(_) => anyhow::bail!("Client read timeout"),
+    };
+    if n == 0 {
+        anyhow::bail!("Client closed connection");
+    }
+    client_buf.extend_from_slice(&tmp[..n]);
+    Ok(())
+}
+
+fn find_crlf(buf: &BytesMut, start: usize) -> Option<usize> {
+    buf[start..]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|i| start + i)
 }
 
 impl Default for Proxy {

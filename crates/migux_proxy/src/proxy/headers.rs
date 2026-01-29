@@ -20,6 +20,7 @@ pub(super) fn rewrite_proxy_headers(
     client_ip: &str,
     keep_alive: bool,
     body_len: usize,
+    is_chunked: bool,
 ) -> String {
     let mut lines = req_headers.lines();
     let _ = lines.next(); // request line (GET /... HTTP/1.1)
@@ -81,7 +82,9 @@ pub(super) fn rewrite_proxy_headers(
     let connection_value = if keep_alive { "keep-alive" } else { "close" };
     headers.push(("Connection".to_string(), connection_value.to_string()));
 
-    if body_len > 0 {
+    if is_chunked {
+        headers.push(("Transfer-Encoding".to_string(), "chunked".to_string()));
+    } else if body_len > 0 {
         headers.push(("Content-Length".to_string(), body_len.to_string()));
     }
 

@@ -126,6 +126,9 @@ Cache fields (defined but not wired yet):
   - Pools connections per concrete upstream address.
   - Each pooled connection stores a read buffer for leftover bytes.
   - Dead sockets are retried with a fresh connection.
+- **Streaming request body**:
+  - Client bodies are streamed to upstream (no full buffering).
+  - Supports Content-Length and chunked requests.
 - **Streaming response**:
   - Streams to the client without full buffering.
   - Supports `Transfer-Encoding: chunked` (real chunk parsing + trailers).
