@@ -5,6 +5,8 @@ Minimal nginx-like server in Rust with static files + reverse proxy.
 ## Quick start
 
 ```bash
+git clone https://github.com/migusmp/migux.git
+cd migux
 cargo run
 ```
 
@@ -62,92 +64,92 @@ type = "static"
 ### Example config (migux.conf style)
 
 ```toml
-; -------- global --------
+# -------- global --------
 [global]
-; Number of worker processes.
+# Number of worker processes.
 worker_processes = 1
-; Max concurrent connections per worker.
+# Max concurrent connections per worker.
 worker_connections = 1024
-; Log level: trace|debug|info|warn|error.
+# Log level: trace|debug|info|warn|error.
 log_level = "info"
-; Error log output path.
+# Error log output path.
 error_log = "/var/log/migux/error.log"
 
-; -------- http --------
+# -------- http --------
 [http]
-; Enable sendfile (if supported by platform).
+# Enable sendfile (if supported by platform).
 sendfile = false
-; Idle keep-alive timeout between requests (seconds).
+# Idle keep-alive timeout between requests (seconds).
 keepalive_timeout_secs = 60
-; Access log output path.
+# Access log output path.
 access_log = "/var/log/migux/access.log"
 
-; Timeouts (seconds).
+# Timeouts (seconds).
 client_read_timeout_secs = 10
 proxy_connect_timeout_secs = 3
 proxy_read_timeout_secs = 30
 proxy_write_timeout_secs = 30
 
-; Limits (bytes).
+# Limits (bytes).
 max_request_headers_bytes = 65536
 max_request_body_bytes = 10485760
 max_upstream_response_headers_bytes = 65536
 max_upstream_response_body_bytes = 10485760
 
-; Upstream connection pool.
+# Upstream connection pool.
 proxy_pool_max_per_addr = 16
 proxy_pool_idle_timeout_secs = 60
 
-; Cache fields (defined but not wired yet).
+# Cache fields (defined but not wired yet).
 cache_dir = "/var/cache/migux"
 cache_default_ttl_secs = 30
 cache_max_object_bytes = 1048576
 
-; -------- upstreams --------
+# -------- upstreams --------
 [upstream.app]
-; Single "host:port" or list ["a:1","b:2"].
+# Single "host:port" or list ["a:1","b:2"].
 server = ["127.0.0.1:3000", "127.0.0.1:3001"]
-; Load-balancing strategy: "round_robin" or "single".
+# Load-balancing strategy: "round_robin" or "single".
 strategy = "round_robin"
 
 [upstream.app.health]
-; Failures before marking the upstream down.
+# Failures before marking the upstream down.
 fail_threshold = 2
-; Cooldown time before retry (seconds).
+# Cooldown time before retry (seconds).
 cooldown_secs = 10
-; Enable active TCP checks.
+# Enable active TCP checks.
 active = false
-; Active check interval (seconds).
+# Active check interval (seconds).
 interval_secs = 10
-; Active check timeout (seconds).
+# Active check timeout (seconds).
 timeout_secs = 1
 
-; -------- servers --------
+# -------- servers --------
 [server.main]
-; HTTP listen address.
+# HTTP listen address.
 listen = "0.0.0.0:8080"
 server_name = "localhost"
 root = "./public"
 index = "index.html"
 
 [server.main.tls]
-; HTTPS listen address.
+# HTTPS listen address.
 listen = "0.0.0.0:8443"
-; Certificate and private key (PEM).
+# Certificate and private key (PEM).
 cert_path = "/etc/migux/certs/fullchain.pem"
 key_path = "/etc/migux/certs/privkey.pem"
-; Redirect HTTP -> HTTPS.
+# Redirect HTTP -> HTTPS.
 redirect_http = true
 
-; -------- locations --------
+# -------- locations --------
 [location.main_root]
-; Bind this location to server.main.
+# Bind this location to server.main.
 server = "main"
-; Prefix match (longest prefix wins).
+# Prefix match (longest prefix wins).
 path = "/"
-; static or proxy.
+# static or proxy.
 type = "static"
-; Optional override (defaults to server.root/index).
+# Optional override (defaults to server.root/index).
 root = "./public"
 index = "index.html"
 
@@ -156,9 +158,9 @@ server = "main"
 path = "/api"
 type = "proxy"
 upstream = "app"
-; Parsed but not used yet.
+# Parsed but not used yet.
 strip_prefix = "/api"
-; Parsed but not used yet.
+# Parsed but not used yet.
 cache = false
 ```
 
