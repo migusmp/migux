@@ -62,6 +62,7 @@ impl Master {
 
         let cfg = self.cfg.clone();
         let proxy = Arc::new(Proxy::new());
+        proxy.start_health_checks(cfg.clone());
 
         info!(
             target: "migux::master",

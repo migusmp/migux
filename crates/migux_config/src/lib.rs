@@ -94,6 +94,7 @@ pub enum UpstreamServers {
 pub struct UpstreamConfig {
     pub server: UpstreamServers,
     pub strategy: Option<String>,
+    pub health: UpstreamHealthConfig,
 }
 
 impl Default for UpstreamConfig {
@@ -101,6 +102,29 @@ impl Default for UpstreamConfig {
         Self {
             server: UpstreamServers::One(String::new()),
             strategy: Some("round_robin".to_string()),
+            health: UpstreamHealthConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct UpstreamHealthConfig {
+    pub fail_threshold: u32,
+    pub cooldown_secs: u64,
+    pub active: bool,
+    pub interval_secs: u64,
+    pub timeout_secs: u64,
+}
+
+impl Default for UpstreamHealthConfig {
+    fn default() -> Self {
+        Self {
+            fail_threshold: 1,
+            cooldown_secs: 10,
+            active: false,
+            interval_secs: 10,
+            timeout_secs: 1,
         }
     }
 }

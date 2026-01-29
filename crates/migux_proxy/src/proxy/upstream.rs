@@ -46,7 +46,7 @@ fn parse_servers_from_one(raw: &str) -> Vec<String> {
 ///
 /// Esta funcion deja SIEMPRE un Vec<String> usable.
 /// Si queda vacio, error.
-fn normalize_servers(cfg: &UpstreamConfig) -> anyhow::Result<Vec<String>> {
+pub(super) fn normalize_servers(cfg: &UpstreamConfig) -> anyhow::Result<Vec<String>> {
     let servers: Vec<String> = match &cfg.server {
         UpstreamServers::One(s) => parse_servers_from_one(s),
         UpstreamServers::Many(list) => list.clone(),

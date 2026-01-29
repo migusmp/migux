@@ -7,14 +7,14 @@ use std::{
 
 use bytes::{Buf, BytesMut};
 use dashmap::DashMap;
-use migux_config::{LocationConfig, MiguxConfig};
+use migux_config::{LocationConfig, MiguxConfig, UpstreamConfig};
 use migux_http::responses::send_502;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    time::{timeout, Duration},
+    time::{interval, timeout, Duration},
 };
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 mod headers;
 mod path;
@@ -37,6 +37,21 @@ pub struct Proxy {
 
     /// Connection pools por upstream address
     pools: DashMap<String, Vec<PooledStream>>,
+
+    /// Health state per upstream address (circuit breaker)
+    health: DashMap<String, UpstreamHealth>,
+}
+
+#[derive(Debug, Clone)]
+struct HealthPolicy {
+    fail_threshold: u32,
+    cooldown: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UpstreamHealth {
+    failures: u32,
+    down_until: Option<Instant>,
 }
 
 pub(super) struct PooledStream {
@@ -66,6 +81,51 @@ impl Proxy {
         Self {
             rr_counters: DashMap::new(),
             pools: DashMap::new(),
+            health: DashMap::new(),
+        }
+    }
+
+    pub fn start_health_checks(self: &Arc<Self>, cfg: Arc<MiguxConfig>) {
+        for (upstream_name, upstream_cfg) in cfg.upstream.iter() {
+            if !upstream_cfg.health.active {
+                continue;
+            }
+
+            let servers = match upstream::normalize_servers(upstream_cfg) {
+                Ok(list) => list,
+                Err(err) => {
+                    warn!(
+                        target: "migux::proxy",
+                        upstream = %upstream_name,
+                        error = ?err,
+                        "Skipping health checks due to invalid upstream config"
+                    );
+                    continue;
+                }
+            };
+
+            let policy = health_policy(upstream_cfg);
+            let interval_secs = upstream_cfg.health.interval_secs.max(1);
+            let timeout_secs = upstream_cfg.health.timeout_secs.max(1);
+            let check_interval = Duration::from_secs(interval_secs);
+            let check_timeout = Duration::from_secs(timeout_secs);
+            let proxy = Arc::clone(self);
+            let upstream_name = upstream_name.clone();
+
+            tokio::spawn(async move {
+                let mut ticker = interval(check_interval);
+                loop {
+                    ticker.tick().await;
+                    for addr in &servers {
+                        let ok = connect_with_timeout(addr, check_timeout).await.is_ok();
+                        if ok {
+                            proxy.record_success(&upstream_name, addr);
+                        } else {
+                            proxy.record_failure(&upstream_name, addr, &policy);
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -114,6 +174,66 @@ impl Proxy {
         debug!(target: "migux::proxy", upstream = %addr, "Returned upstream connection to pool");
     }
 
+    fn filter_healthy_addrs(
+        &self,
+        upstream_name: &str,
+        addrs: Vec<String>,
+    ) -> Vec<String> {
+        let now = Instant::now();
+        let mut healthy = Vec::new();
+        for addr in &addrs {
+            if self.is_healthy(upstream_name, addr, now) {
+                healthy.push(addr.clone());
+            }
+        }
+        if healthy.is_empty() {
+            addrs
+        } else {
+            healthy
+        }
+    }
+
+    fn is_healthy(&self, upstream_name: &str, addr: &str, now: Instant) -> bool {
+        let key = health_key(upstream_name, addr);
+        if let Some(mut entry) = self.health.get_mut(&key) {
+            if let Some(until) = entry.down_until {
+                if until > now {
+                    return false;
+                }
+                entry.down_until = None;
+                entry.failures = 0;
+            }
+        }
+        true
+    }
+
+    fn record_failure(&self, upstream_name: &str, addr: &str, policy: &HealthPolicy) {
+        let key = health_key(upstream_name, addr);
+        let mut entry = self
+            .health
+            .entry(key)
+            .or_insert_with(UpstreamHealth::default);
+        entry.failures = entry.failures.saturating_add(1);
+        let threshold = policy.fail_threshold.max(1);
+        if entry.failures >= threshold {
+            entry.down_until = Some(Instant::now() + policy.cooldown);
+            debug!(
+                target: "migux::proxy",
+                upstream = %upstream_name,
+                addr = %addr,
+                "Marking upstream as down"
+            );
+        }
+    }
+
+    fn record_success(&self, upstream_name: &str, addr: &str) {
+        let key = health_key(upstream_name, addr);
+        if let Some(mut entry) = self.health.get_mut(&key) {
+            entry.failures = 0;
+            entry.down_until = None;
+        }
+    }
+
     /// Entry point de una location proxy.
     ///
     /// - resuelve upstream por nombre
@@ -160,6 +280,8 @@ impl Proxy {
             upstream_name,
             upstream_cfg,
         )?;
+        let policy = health_policy(upstream_cfg);
+        let candidate_addrs = self.filter_healthy_addrs(upstream_name, candidate_addrs);
         let client_ip = client_addr.ip().to_string();
         let connect_timeout = Duration::from_secs(cfg.http.proxy_connect_timeout_secs);
         let idle_ttl = Duration::from_secs(cfg.http.proxy_pool_idle_timeout_secs);
@@ -214,6 +336,7 @@ impl Proxy {
                 Err(e) => {
                     error!(target: "migux::proxy", upstream=%upstream_addr, error=?e, "Failed to get upstream connection");
                     last_err = Some(e);
+                    self.record_failure(upstream_name, upstream_addr, &policy);
                     continue;
                 }
             };
@@ -256,6 +379,7 @@ impl Proxy {
                                         "Write failed even with fresh connection"
                                     );
                                     last_err = Some(e2.into());
+                                    self.record_failure(upstream_name, upstream_addr, &policy);
                                     continue;
                                 }
                                 Err(_) => {
@@ -268,6 +392,7 @@ impl Proxy {
                                         "Upstream write timeout to {}",
                                         upstream_addr
                                     ));
+                                    self.record_failure(upstream_name, upstream_addr, &policy);
                                     continue;
                                 }
                             }
@@ -280,6 +405,7 @@ impl Proxy {
                                 "Failed to connect fresh after pooled write failure"
                             );
                             last_err = Some(e2);
+                            self.record_failure(upstream_name, upstream_addr, &policy);
                             continue;
                         }
                     }
@@ -305,6 +431,7 @@ impl Proxy {
                                         "Write failed even with fresh connection"
                                     );
                                     last_err = Some(e2.into());
+                                    self.record_failure(upstream_name, upstream_addr, &policy);
                                     continue;
                                 }
                                 Err(_) => {
@@ -317,6 +444,7 @@ impl Proxy {
                                         "Upstream write timeout to {}",
                                         upstream_addr
                                     ));
+                                    self.record_failure(upstream_name, upstream_addr, &policy);
                                     continue;
                                 }
                             }
@@ -329,6 +457,7 @@ impl Proxy {
                                 "Failed to connect fresh after pooled write failure"
                             );
                             last_err = Some(e2);
+                            self.record_failure(upstream_name, upstream_addr, &policy);
                             continue;
                         }
                     }
@@ -367,6 +496,7 @@ impl Proxy {
                         "Error reading response from upstream"
                     );
                     last_err = Some(e);
+                    self.record_failure(upstream_name, upstream_addr, &policy);
                     continue;
                 }
             };
@@ -375,6 +505,8 @@ impl Proxy {
             if reusable {
                 self.checkin_upstream_stream(upstream_addr, upstream_stream, max_pool);
             }
+
+            self.record_success(upstream_name, upstream_addr);
 
             // exito: ya hemos respondido al cliente
             return Ok(());
@@ -558,6 +690,19 @@ impl Default for Proxy {
     }
 }
 
+fn health_key(upstream_name: &str, addr: &str) -> String {
+    format!("{upstream_name}|{addr}")
+}
+
+fn health_policy(cfg: &UpstreamConfig) -> HealthPolicy {
+    let threshold = cfg.health.fail_threshold.max(1);
+    let cooldown_secs = cfg.health.cooldown_secs;
+    HealthPolicy {
+        fail_threshold: threshold,
+        cooldown: Duration::from_secs(cooldown_secs),
+    }
+}
+
 /// Crea una conexion nueva (fresh) a un upstream.
 /// Se usa como fallback si una conexion reutilizada estaba muerta.
 async fn connect_fresh(addr: &str, timeout_dur: Duration) -> anyhow::Result<PooledStream> {
@@ -569,5 +714,60 @@ async fn connect_with_timeout(addr: &str, timeout_dur: Duration) -> anyhow::Resu
     match timeout(timeout_dur, TcpStream::connect(addr)).await {
         Ok(res) => Ok(res?),
         Err(_) => anyhow::bail!("Upstream connect timeout to {}", addr),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{health_key, HealthPolicy, Proxy, UpstreamHealth};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn filter_healthy_addrs_skips_down_nodes() {
+        let proxy = Proxy::new();
+        let policy = HealthPolicy {
+            fail_threshold: 1,
+            cooldown: Duration::from_secs(60),
+        };
+        proxy.record_failure("api", "127.0.0.1:3000", &policy);
+        let addrs = vec![
+            "127.0.0.1:3000".to_string(),
+            "127.0.0.1:3001".to_string(),
+        ];
+        let filtered = proxy.filter_healthy_addrs("api", addrs);
+        assert_eq!(filtered, vec!["127.0.0.1:3001".to_string()]);
+    }
+
+    #[test]
+    fn filter_healthy_addrs_falls_back_when_all_down() {
+        let proxy = Proxy::new();
+        let policy = HealthPolicy {
+            fail_threshold: 1,
+            cooldown: Duration::from_secs(60),
+        };
+        proxy.record_failure("api", "127.0.0.1:3000", &policy);
+        proxy.record_failure("api", "127.0.0.1:3001", &policy);
+        let addrs = vec![
+            "127.0.0.1:3000".to_string(),
+            "127.0.0.1:3001".to_string(),
+        ];
+        let filtered = proxy.filter_healthy_addrs("api", addrs.clone());
+        assert_eq!(filtered, addrs);
+    }
+
+    #[test]
+    fn filter_healthy_addrs_recovers_after_cooldown() {
+        let proxy = Proxy::new();
+        let key = health_key("api", "127.0.0.1:3000");
+        proxy.health.insert(
+            key,
+            UpstreamHealth {
+                failures: 1,
+                down_until: Some(Instant::now() - Duration::from_secs(1)),
+            },
+        );
+        let addrs = vec!["127.0.0.1:3000".to_string()];
+        let filtered = proxy.filter_healthy_addrs("api", addrs);
+        assert_eq!(filtered, vec!["127.0.0.1:3000".to_string()]);
     }
 }

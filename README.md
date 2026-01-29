@@ -99,6 +99,12 @@ Cache fields (defined but not wired yet):
 
 - `server`: single `"host:port"` or list `["a:1","b:2"]`
 - `strategy`: `"round_robin"` or `"single"`
+- `health` (optional table)
+  - `fail_threshold` (default 1)
+  - `cooldown_secs` (default 10)
+  - `active` (default false)
+  - `interval_secs` (default 10)
+  - `timeout_secs` (default 1)
 
 ### [server.<name>]
 
@@ -120,7 +126,7 @@ Cache fields (defined but not wired yet):
 
 ## Proxy behavior
 
-- **Routing**: selects an upstream by round-robin (if configured).
+- **Routing**: selects an upstream by round-robin (if configured) and skips down nodes.
 - **Prefix strip**: uses `location.path` to strip prefix (nginx-like).
 - **Headers**:
   - Removes hop-by-hop headers.
