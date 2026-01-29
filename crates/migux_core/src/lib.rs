@@ -29,7 +29,7 @@ pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
                server = "main"
                path = "/"
                type = "static"
-               root = "/home/migus/var/www/public"
+               root = "var/www/public"
                index = "index.html"
 
         */
@@ -61,6 +61,8 @@ pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {
             locations,
         ));
     }
+
+    println!("MAAAAAP: {:?}", map);
 
     map
 }

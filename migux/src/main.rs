@@ -9,15 +9,14 @@ async fn main() -> anyhow::Result<()> {
     let cfg = match MiguxConfig::from_file("migux.conf") {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("Error leyendo migux.conf: {e}");
-            eprintln!("Continuando con configuración por defecto...");
+            eprintln!("Error reading migux config from migux.conf: {e}");
+            eprintln!("Using default config...");
             MiguxConfig::default()
         }
     };
-    cfg.print();
 
     let master = Master::new(cfg);
-    let _ = master.run().await?;
+    master.run().await?;
 
     Ok(())
 }

@@ -1,12 +1,16 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use migux_http::responses::send_404;
-use migux_proxy::serve_proxy;
+use migux_http::responses::{send_404, send_408, send_413, send_431};
+use migux_proxy::Proxy;
 use migux_static::serve_static;
-use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::{
+    io::AsyncReadExt,
+    net::TcpStream,
+    time::{timeout, Duration},
+};
 use tracing::{debug, info, instrument, warn};
 
-use migux_config::{LocationType, MiguxConfig};
+use migux_config::{HttpConfig, LocationType, MiguxConfig};
 
 use crate::ServerRuntime;
 
@@ -16,7 +20,7 @@ use routing::{match_location, parse_request_line, select_default_server};
 
 /// Entry point for a “logical worker” that handles a single connection.
 #[instrument(
-    skip(stream, servers, cfg),
+    skip(stream, servers, proxy, cfg),
     fields(
         client = %client_addr,
     )
@@ -25,12 +29,13 @@ pub async fn handle_connection(
     mut stream: TcpStream,
     client_addr: SocketAddr,
     servers: Arc<Vec<ServerRuntime>>,
+    proxy: Arc<Proxy>,
     cfg: Arc<MiguxConfig>,
 ) -> anyhow::Result<()> {
     info!(target: "migux::worker", "Handling new client connection");
 
     // 1) Read the entire HTTP request (headers + optional body)
-    let (req_headers, req_body) = read_http_request(&mut stream).await?;
+    let (req_headers, req_body) = read_http_request(&mut stream, &cfg.http).await?;
 
     if req_headers.is_empty() {
         debug!(target: "migux::worker", "Empty request received; closing connection");
@@ -108,16 +113,17 @@ pub async fn handle_connection(
                 "Forwarding request to upstream proxy"
             );
 
-            serve_proxy(
-                &mut stream,
-                location,
-                path,
-                &req_headers,
-                &req_body,
-                &cfg,
-                &client_addr,
-            )
-            .await?;
+            proxy
+                .serve(
+                    &mut stream,
+                    location,
+                    path,
+                    &req_headers,
+                    &req_body,
+                    &cfg,
+                    &client_addr,
+                )
+                .await?;
         }
     }
 
@@ -135,15 +141,27 @@ pub async fn handle_connection(
 /// - Extracts Content-Length if present
 /// - Reads the full body if required
 /// - Returns (headers as String, body as Vec<u8>)
-#[instrument(skip(stream), fields())]
-async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, Vec<u8>)> {
+#[instrument(skip(stream, http), fields())]
+async fn read_http_request(
+    stream: &mut TcpStream,
+    http: &HttpConfig,
+) -> anyhow::Result<(String, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let headers_end;
+    let read_timeout = Duration::from_secs(http.client_read_timeout_secs);
+    let max_headers = http.max_request_headers_bytes as usize;
+    let max_body = http.max_request_body_bytes as usize;
 
     // 1) Read until header terminator
     loop {
-        let n = stream.read(&mut tmp).await?;
+        let n = match timeout(read_timeout, stream.read(&mut tmp)).await {
+            Ok(res) => res?,
+            Err(_) => {
+                send_408(stream).await?;
+                return Ok((String::new(), Vec::new()));
+            }
+        };
         if n == 0 {
             if buf.is_empty() {
                 debug!(
@@ -168,7 +186,10 @@ async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, Ve
             break;
         }
 
-        // Optional: enforce max header size for safety
+        if buf.len() > max_headers {
+            send_431(stream).await?;
+            return Ok((String::new(), Vec::new()));
+        }
     }
 
     let header_bytes = &buf[..headers_end];
@@ -192,6 +213,10 @@ async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, Ve
     }
 
     if content_length > 0 {
+        if content_length > max_body {
+            send_413(stream).await?;
+            return Ok((String::new(), Vec::new()));
+        }
         debug!(
             target: "migux::http",
             content_length,
@@ -204,12 +229,22 @@ async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, Ve
     let mut body = Vec::new();
 
     if already_read_body > 0 && headers_end + 4 <= buf.len() {
+        if already_read_body > max_body {
+            send_413(stream).await?;
+            return Ok((String::new(), Vec::new()));
+        }
         body.extend_from_slice(&buf[headers_end + 4..]);
     }
 
     // 4) Read remaining body if needed
     while body.len() < content_length {
-        let n = stream.read(&mut tmp).await?;
+        let n = match timeout(read_timeout, stream.read(&mut tmp)).await {
+            Ok(res) => res?,
+            Err(_) => {
+                send_408(stream).await?;
+                return Ok((String::new(), Vec::new()));
+            }
+        };
         if n == 0 {
             warn!(
                 target: "migux::http",
@@ -219,7 +254,9 @@ async fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<(String, Ve
             );
             break;
         }
-        body.extend_from_slice(&tmp[..n]);
+        let remaining = content_length - body.len();
+        let take = remaining.min(n);
+        body.extend_from_slice(&tmp[..take]);
     }
 
     Ok((headers_str, body))

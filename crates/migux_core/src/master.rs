@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use dashmap::{self, DashMap};
 use migux_config::MiguxConfig;
+use migux_proxy::Proxy;
 use tokio::{net::TcpListener, sync::Semaphore};
 use tracing::{debug, error, info, instrument, warn};
 
@@ -60,6 +61,7 @@ impl Master {
         let semaphore = Arc::new(Semaphore::new(max_conns));
 
         let cfg = self.cfg.clone();
+        let proxy = Arc::new(Proxy::new());
 
         info!(
             target: "migux::master",
@@ -100,6 +102,7 @@ impl Master {
             let sem_clone = semaphore.clone();
             let servers_for_listener = servers.clone();
             let cfg_clone = cfg.clone();
+            let proxy_clone = proxy.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = accept_loop(
@@ -107,6 +110,7 @@ impl Master {
                     addr.clone(),
                     sem_clone,
                     Arc::new(servers_for_listener),
+                    proxy_clone,
                     cfg_clone,
                 )
                 .await
@@ -140,7 +144,7 @@ impl Master {
 }
 
 #[instrument(
-    skip(listener, semaphore, servers, cfg),
+    skip(listener, semaphore, servers, proxy, cfg),
     fields(
         listen = %listen_addr,
         max_permits = semaphore.available_permits(),
@@ -151,6 +155,7 @@ async fn accept_loop(
     listen_addr: String,
     semaphore: Arc<Semaphore>,
     servers: Arc<Vec<ServerRuntime>>,
+    proxy: Arc<Proxy>,
     cfg: Arc<MiguxConfig>,
 ) -> anyhow::Result<()> {
     info!(
@@ -206,6 +211,7 @@ async fn accept_loop(
         );
 
         let servers_clone = servers.clone();
+        let proxy_clone = proxy.clone();
         let cfg_clone = cfg.clone();
         let listen_for_span = listen_this.clone();
 
@@ -222,7 +228,9 @@ async fn accept_loop(
                 "Worker spawned for incoming connection"
             );
 
-            if let Err(e) = handle_connection(stream, addr, servers_clone, cfg_clone).await {
+            if let Err(e) =
+                handle_connection(stream, addr, servers_clone, proxy_clone, cfg_clone).await
+            {
                 error!(
                     target: "migux::worker",
                     client_addr = %addr,

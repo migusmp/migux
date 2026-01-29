@@ -61,3 +61,20 @@ pub async fn send_502(stream: &mut TcpStream) -> anyhow::Result<()> {
 pub async fn send_405(stream: &mut TcpStream) -> anyhow::Result<()> {
     send_text_response(stream, "405 Method Not Allowed", "405 Method Not Allowed\n").await
 }
+
+pub async fn send_408(stream: &mut TcpStream) -> anyhow::Result<()> {
+    send_text_response(stream, "408 Request Timeout", "408 Request Timeout\n").await
+}
+
+pub async fn send_413(stream: &mut TcpStream) -> anyhow::Result<()> {
+    send_text_response(stream, "413 Payload Too Large", "413 Payload Too Large\n").await
+}
+
+pub async fn send_431(stream: &mut TcpStream) -> anyhow::Result<()> {
+    send_text_response(
+        stream,
+        "431 Request Header Fields Too Large",
+        "431 Request Header Fields Too Large\n",
+    )
+    .await
+}

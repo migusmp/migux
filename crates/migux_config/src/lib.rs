@@ -34,6 +34,18 @@ pub struct HttpConfig {
     pub keepalive_timeout_secs: u64,
     pub access_log: String,
 
+    // Timeouts (seconds)
+    pub client_read_timeout_secs: u64,
+    pub proxy_connect_timeout_secs: u64,
+    pub proxy_read_timeout_secs: u64,
+    pub proxy_write_timeout_secs: u64,
+
+    // Limits (bytes)
+    pub max_request_headers_bytes: u64,
+    pub max_request_body_bytes: u64,
+    pub max_upstream_response_headers_bytes: u64,
+    pub max_upstream_response_body_bytes: u64,
+
     // Caché control
     pub cache_dir: Option<String>,
     pub cache_default_ttl_secs: Option<u32>,
@@ -46,6 +58,14 @@ impl Default for HttpConfig {
             sendfile: true,
             keepalive_timeout_secs: 65,
             access_log: "/var/log/migux/access.log".into(),
+            client_read_timeout_secs: 15,
+            proxy_connect_timeout_secs: 5,
+            proxy_read_timeout_secs: 30,
+            proxy_write_timeout_secs: 30,
+            max_request_headers_bytes: 64 * 1024,
+            max_request_body_bytes: 10 * 1024 * 1024,
+            max_upstream_response_headers_bytes: 64 * 1024,
+            max_upstream_response_body_bytes: 10 * 1024 * 1024,
             cache_dir: None,
             cache_default_ttl_secs: None,
             cache_max_object_bytes: None,
@@ -176,7 +196,6 @@ pub struct MiguxConfig {
     pub location: HashMap<String, LocationConfig>,
 }
 
-// Default “en memoria”: sin leer fichero
 impl Default for MiguxConfig {
     fn default() -> Self {
         let mut cfg = Self {
@@ -207,8 +226,8 @@ impl MiguxConfig {
         match Self::from_file(file_name) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("⚠️  Error leyendo configuración '{file_name}': {e}");
-                eprintln!("➡️  Usando configuración por defecto (in-memory)...");
+                eprintln!("⚠️  Error reading config'{file_name}': {e}");
+                eprintln!("➡️  Using default config(in-memory)...");
                 MiguxConfig::default()
             }
         }
@@ -246,6 +265,34 @@ impl MiguxConfig {
         if self.http.access_log.is_empty() {
             self.http.access_log = def_http.access_log.clone();
         }
+        if self.http.keepalive_timeout_secs == 0 {
+            self.http.keepalive_timeout_secs = def_http.keepalive_timeout_secs;
+        }
+        if self.http.client_read_timeout_secs == 0 {
+            self.http.client_read_timeout_secs = def_http.client_read_timeout_secs;
+        }
+        if self.http.proxy_connect_timeout_secs == 0 {
+            self.http.proxy_connect_timeout_secs = def_http.proxy_connect_timeout_secs;
+        }
+        if self.http.proxy_read_timeout_secs == 0 {
+            self.http.proxy_read_timeout_secs = def_http.proxy_read_timeout_secs;
+        }
+        if self.http.proxy_write_timeout_secs == 0 {
+            self.http.proxy_write_timeout_secs = def_http.proxy_write_timeout_secs;
+        }
+        if self.http.max_request_headers_bytes == 0 {
+            self.http.max_request_headers_bytes = def_http.max_request_headers_bytes;
+        }
+        if self.http.max_request_body_bytes == 0 {
+            self.http.max_request_body_bytes = def_http.max_request_body_bytes;
+        }
+        if self.http.max_upstream_response_headers_bytes == 0 {
+            self.http.max_upstream_response_headers_bytes =
+                def_http.max_upstream_response_headers_bytes;
+        }
+        if self.http.max_upstream_response_body_bytes == 0 {
+            self.http.max_upstream_response_body_bytes = def_http.max_upstream_response_body_bytes;
+        }
 
         // SERVERS
         let def_server = ServerConfig::default();
@@ -281,7 +328,6 @@ impl MiguxConfig {
         }
     }
 
-    // opcional: para ver qué se ha cargado
     pub fn print(&self) {
         println!("================ MIGUX CONFIG ================");
 
@@ -301,6 +347,38 @@ impl MiguxConfig {
             self.http.keepalive_timeout_secs
         );
         println!("  access_log           = {}", self.http.access_log);
+        println!(
+            "  client_read_timeout_secs = {}",
+            self.http.client_read_timeout_secs
+        );
+        println!(
+            "  proxy_connect_timeout_secs = {}",
+            self.http.proxy_connect_timeout_secs
+        );
+        println!(
+            "  proxy_read_timeout_secs = {}",
+            self.http.proxy_read_timeout_secs
+        );
+        println!(
+            "  proxy_write_timeout_secs = {}",
+            self.http.proxy_write_timeout_secs
+        );
+        println!(
+            "  max_request_headers_bytes = {}",
+            self.http.max_request_headers_bytes
+        );
+        println!(
+            "  max_request_body_bytes = {}",
+            self.http.max_request_body_bytes
+        );
+        println!(
+            "  max_upstream_response_headers_bytes = {}",
+            self.http.max_upstream_response_headers_bytes
+        );
+        println!(
+            "  max_upstream_response_body_bytes = {}",
+            self.http.max_upstream_response_body_bytes
+        );
         println!("  cache_dir       = {:?}", self.http.cache_dir);
         println!(
             "  cache_default_ttl_secs       = {:?}",
