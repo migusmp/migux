@@ -168,12 +168,13 @@ impl Proxy {
 
         // 6) reescribir headers para upstream
         let keep_alive = http_version != "HTTP/1.0";
+        let upstream_is_chunked = is_chunked && content_length == 0;
         let rest_of_headers = headers::rewrite_proxy_headers(
             req_headers,
             &client_ip,
             keep_alive,
             content_length,
-            is_chunked,
+            upstream_is_chunked,
         );
 
         // 7) construir request completa (start line + headers + blank line + body)
@@ -381,7 +382,7 @@ async fn stream_request_body(
     read_timeout: Duration,
     max_body: usize,
 ) -> anyhow::Result<()> {
-    if is_chunked {
+    if is_chunked && content_length == 0 {
         stream_chunked_body(
             client_stream,
             client_buf,

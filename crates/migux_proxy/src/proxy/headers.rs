@@ -84,7 +84,7 @@ pub(super) fn rewrite_proxy_headers(
 
     if is_chunked {
         headers.push(("Transfer-Encoding".to_string(), "chunked".to_string()));
-    } else if body_len > 0 {
+    } else {
         headers.push(("Content-Length".to_string(), body_len.to_string()));
     }
 
