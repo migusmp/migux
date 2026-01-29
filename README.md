@@ -100,7 +100,7 @@ max_upstream_response_body_bytes = 10485760
 proxy_pool_max_per_addr = 16
 proxy_pool_idle_timeout_secs = 60
 
-# Static cache settings (used for GET on static locations).
+# Static cache settings (disk cache for GET on static locations).
 cache_dir = "/var/cache/migux"
 cache_default_ttl_secs = 30
 cache_max_object_bytes = 1048576
@@ -214,6 +214,7 @@ curl --http2 -k https://localhost:8443/
 - Resolves files based on `root` and `index`.
 - Uses MIME type detection.
 - Always returns `Connection: close`.
+- Disk-backed cache (optional): stores `.cache` and `.meta` files under `cache_dir` and also keeps a memory copy for hot hits.
 
 ## Error responses
 
