@@ -194,7 +194,7 @@ If configured, Migux can terminate HTTPS and (optionally) redirect HTTP to HTTPS
 
 Example:
 
-```
+```ini
 [server.main.tls]
 listen = "0.0.0.0:8443"
 cert_path = "/etc/migux/certs/fullchain.pem"
