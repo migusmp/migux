@@ -18,6 +18,15 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
+impl CacheEntry {
+    pub fn new(response: Vec<u8>, expires_at: Instant) -> Self {
+        Self {
+            response,
+            expires_at
+        }
+    }
+}
+
 /// Global in-memory cache map for static responses.
 static STATIC_CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
 
@@ -44,10 +53,9 @@ pub(crate) fn cache_put(key: String, response: Vec<u8>, ttl: Duration) {
     if ttl.as_secs() == 0 {
         return;
     }
-    let entry = CacheEntry {
-        response,
-        expires_at: Instant::now() + ttl,
-    };
+
+    let entry = CacheEntry::new(response, Instant::now() + ttl);
+    
     if let Ok(mut map) = cache_store().lock() {
         map.insert(key, entry);
     }
