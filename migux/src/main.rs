@@ -14,7 +14,6 @@ async fn main() -> anyhow::Result<()> {
             MiguxConfig::default()
         }
     };
-
     let master = Master::new(cfg);
     master.run().await?;
 

@@ -2,13 +2,16 @@ use std::collections::HashMap;
 
 use migux_config::{LocationConfig, LocationType, MiguxConfig};
 
-use crate::{structs::ServerRuntime, types::{ServersByListen, TlsListenConfig, TlsServersByListen}};
+use crate::{
+    structs::ServerRuntime,
+    types::{ServersByListen, TlsListenConfig, TlsServersByListen},
+};
 
+pub mod http2;
 pub mod master;
 pub mod structs;
 pub mod types;
 pub mod worker;
-pub mod http2;
 
 /// Build a map of TCP listen address -> servers bound to that address.
 pub fn build_servers_by_listen(cfg: &MiguxConfig) -> ServersByListen {

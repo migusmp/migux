@@ -7,17 +7,13 @@ use tokio::{net::TcpListener, sync::Semaphore};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
-    build_servers_by_listen,
-    build_tls_servers_by_listen,
-    http2::serve_h2_connection,
-    worker::handle_connection,
-    ServerRuntime,
-    ServersByListen,
+    build_servers_by_listen, build_tls_servers_by_listen, http2::serve_h2_connection,
+    worker::handle_connection, ServerRuntime, ServersByListen,
 };
 use migux_config::TlsConfig;
 use std::{fs::File, io::BufReader};
-use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls;
+use tokio_rustls::TlsAcceptor;
 
 pub struct CacheStore {
     pub responses: DashMap<String, Vec<u8>>,
@@ -153,6 +149,15 @@ impl Master {
                     target: "migux::master",
                     listen = %listen_addr,
                     "TLS config missing cert/key path; skipping TLS listener"
+                );
+                continue;
+            }
+
+            if tls_cfg.servers.is_empty() {
+                warn!(
+                    target: "migux::master",
+                    listen = %listen_addr,
+                    "TLS config missing servers; skipping TLS listener"
                 );
                 continue;
             }
@@ -458,25 +463,15 @@ async fn accept_loop_tls(
                 }
             };
 
-            let alpn = tls_stream
-                .get_ref()
-                .1
-                .alpn_protocol()
-                .map(|v| v.to_vec());
+            let alpn = tls_stream.get_ref().1.alpn_protocol().map(|v| v.to_vec());
 
             let servers_h2 = servers_clone.clone();
             let proxy_h2 = proxy_clone.clone();
             let cfg_h2 = cfg_clone.clone();
 
             if matches!(alpn.as_deref(), Some(b"h2")) {
-                if let Err(e) = serve_h2_connection(
-                    tls_stream,
-                    addr,
-                    servers_h2,
-                    proxy_h2,
-                    cfg_h2,
-                )
-                .await
+                if let Err(e) =
+                    serve_h2_connection(tls_stream, addr, servers_h2, proxy_h2, cfg_h2).await
                 {
                     error!(
                         target: "migux::worker",

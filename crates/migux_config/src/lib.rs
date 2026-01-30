@@ -318,7 +318,7 @@ impl ServerConfig {
 // TLS CONFIG
 // =======================================================
 #[derive(Debug, Deserialize, Clone)]
-#[serde(default)]
+// #[serde(default)]
 /// TLS listener configuration for a server.
 pub struct TlsConfig {
     /// TLS listen address (host:port).
@@ -333,17 +333,17 @@ pub struct TlsConfig {
     pub http2: bool,
 }
 
-impl Default for TlsConfig {
-    fn default() -> Self {
-        Self {
-            listen: "0.0.0.0:8443".into(),
-            cert_path: String::new(),
-            key_path: String::new(),
-            redirect_http: false,
-            http2: false,
-        }
-    }
-}
+// impl Default for TlsConfig {
+//     fn default() -> Self {
+//         Self {
+//             listen: "0.0.0.0:8443".into(),
+//             cert_path: String::new(),
+//             key_path: String::new(),
+//             redirect_http: false,
+//             http2: false,
+//         }
+//     }
+// }
 
 impl TlsConfig {
     pub fn listen(&self) -> &str {
@@ -489,6 +489,9 @@ impl Default for MiguxConfig {
 }
 
 impl MiguxConfig {
+    pub fn has_tls_servers(&self) -> bool {
+        self.servers.values().any(|s| s.tls.is_some())
+    }
     pub fn global(&self) -> &GlobalConfig {
         &self.global
     }
@@ -612,7 +615,7 @@ impl MiguxConfig {
 
         // SERVERS
         let def_server = ServerConfig::default();
-        let def_tls = TlsConfig::default();
+        // let def_tls = TlsConfig::default();
 
         for s in self.servers.values_mut() {
             if s.listen.is_empty() {
@@ -627,11 +630,11 @@ impl MiguxConfig {
             if s.index.is_empty() {
                 s.index = def_server.index.clone();
             }
-            if let Some(tls) = s.tls.as_mut() {
-                if tls.listen.is_empty() {
-                    tls.listen = def_tls.listen.clone();
-                }
-            }
+            // if let Some(tls) = s.tls.as_mut() {
+            //     if tls.listen.is_empty() {
+            //         tls.listen = def_tls.listen.clone();
+            //     }
+            // }
         }
 
         // LOCATIONS
