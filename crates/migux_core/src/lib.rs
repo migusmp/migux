@@ -79,6 +79,7 @@ pub fn build_tls_servers_by_listen(cfg: &MiguxConfig) -> TlsServersByListen {
         };
 
         let listen_key = tls_cfg.listen.clone();
+
         let mut locations: Vec<LocationConfig> = cfg
             .location
             .values()
@@ -86,6 +87,7 @@ pub fn build_tls_servers_by_listen(cfg: &MiguxConfig) -> TlsServersByListen {
             .cloned()
             .collect();
 
+        // If locations is empty, create a default location for this server
         if locations.is_empty() {
             locations.push(LocationConfig {
                 server: server_name.clone(),
@@ -105,11 +107,7 @@ pub fn build_tls_servers_by_listen(cfg: &MiguxConfig) -> TlsServersByListen {
             .and_modify(|entry| {
                 entry.servers.push(runtime.clone());
             })
-            .or_insert_with(|| TlsListenConfig {
-                listen: listen_key,
-                tls: tls_cfg.clone(),
-                servers: vec![runtime],
-            });
+            .or_insert_with(|| TlsListenConfig::new(listen_key, tls_cfg.clone(), vec![runtime]));
     }
 
     map

@@ -19,5 +19,15 @@ pub struct TlsListenConfig {
     pub servers: Vec<ServerRuntime>,
 }
 
+impl TlsListenConfig {
+    pub fn new(listen: ListenAddr, tls: TlsConfig, servers: Vec<ServerRuntime>) -> Self {
+        Self {
+            listen,
+            tls,
+            servers,
+        }
+    }
+}
+
 /// Map of TLS listen address to TLS config + servers.
 pub type TlsServersByListen = HashMap<ListenAddr, TlsListenConfig>;

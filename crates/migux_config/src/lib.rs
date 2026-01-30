@@ -333,18 +333,6 @@ pub struct TlsConfig {
     pub http2: bool,
 }
 
-// impl Default for TlsConfig {
-//     fn default() -> Self {
-//         Self {
-//             listen: "0.0.0.0:8443".into(),
-//             cert_path: String::new(),
-//             key_path: String::new(),
-//             redirect_http: false,
-//             http2: false,
-//         }
-//     }
-// }
-
 impl TlsConfig {
     pub fn listen(&self) -> &str {
         &self.listen
@@ -388,7 +376,7 @@ pub struct LocationConfig {
     pub server: String,
     pub path: String,
     pub r#type: LocationType, // static | proxy
-    pub root: Option<String>, // solo para static
+    pub root: Option<String>, // only static content
     pub index: Option<String>,
     pub upstream: Option<String>,
     pub strip_prefix: Option<String>,
