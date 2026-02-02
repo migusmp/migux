@@ -170,6 +170,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Lets you filter logs by environment variable:
 #   RUST_LOG=migux=debug cargo run
 
+httpdate = "1"
 config = "0.14"
 dashmap = "6.1.0"
 tokio-rustls = "0.24"

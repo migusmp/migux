@@ -9,6 +9,7 @@ migux_proxy = { path = "../migux_proxy" }
 migux_config = { path = "../migux_config" }
 
 tokio = { workspace = true }
+httpdate = { workspace = true }
 mime_guess = { workspace = true }
 anyhow = { workspace = true }
 http = { workspace = true }

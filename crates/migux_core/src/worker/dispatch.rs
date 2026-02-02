@@ -52,6 +52,7 @@ pub(crate) async fn dispatch_location(
                 &server.config,
                 location,
                 method,
+                &req.headers,
                 path,
                 keep_alive,
             )
