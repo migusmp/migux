@@ -241,6 +241,13 @@ impl MiguxConfig {
                 println!("    tls.key_path      = {}", tls.key_path);
                 println!("    tls.redirect_http = {}", tls.redirect_http);
                 println!("    tls.http2         = {}", tls.http2);
+                if let Some(max_age) = tls.hsts_max_age_secs {
+                    println!("    tls.hsts_max_age_secs = {}", max_age);
+                    println!(
+                        "    tls.hsts_include_subdomains = {}",
+                        tls.hsts_include_subdomains.unwrap_or(false)
+                    );
+                }
             }
         }
     }

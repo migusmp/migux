@@ -84,6 +84,7 @@ impl Proxy {
         content_length: usize,
         is_chunked: bool,
         client_is_tls: bool,
+        hsts_header: Option<&str>,
         cfg: &Arc<MiguxConfig>,
         client_addr: &SocketAddr,
     ) -> anyhow::Result<()>
@@ -314,6 +315,7 @@ impl Proxy {
                 read_timeout,
                 max_resp_headers,
                 max_resp_body,
+                hsts_header,
             )
             .await
             {

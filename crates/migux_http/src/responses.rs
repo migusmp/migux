@@ -67,6 +67,24 @@ pub async fn send_405<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow:
     send_text_response(stream, "405 Method Not Allowed", "405 Method Not Allowed\n").await
 }
 
+/// Send a 405 Method Not Allowed response with an Allow header.
+pub async fn send_405_with_allow<W: AsyncWrite + Unpin + ?Sized>(
+    stream: &mut W,
+    allow: &str,
+) -> anyhow::Result<()> {
+    let response = format!(
+        "HTTP/1.1 405 Method Not Allowed\r\n\
+         Server: migux/0.1.0\r\n\
+         Allow: {allow}\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 /// Send a 400 Bad Request response.
 pub async fn send_400<W: AsyncWrite + Unpin + ?Sized>(stream: &mut W) -> anyhow::Result<()> {
     send_text_response(stream, "400 Bad Request", "400 Bad Request\n").await

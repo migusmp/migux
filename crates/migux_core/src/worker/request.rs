@@ -138,7 +138,7 @@ pub(crate) fn extract_host_header(headers: &str) -> Option<String> {
         };
         if name.trim().eq_ignore_ascii_case("host") {
             let host = value.trim();
-            if !host.is_empty() {
+            if !host.is_empty() && is_valid_host(host) {
                 return Some(host.to_string());
             }
         }
@@ -164,6 +164,11 @@ struct RequestMetadata {
 enum HeaderParseError {
     InvalidContentLength,
     ConflictingContentLength,
+    InvalidHost,
+    ConflictingHost,
+    MissingHost,
+    InvalidTransferEncoding,
+    TransferEncodingContentLength,
 }
 
 #[derive(Default)]
@@ -231,6 +236,11 @@ fn parse_request_metadata(headers: &str) -> Result<RequestMetadata, HeaderParseE
     let mut connection_close = false;
     let mut connection_keep_alive = false;
     let mut is_chunked = false;
+    let mut host_value: Option<String> = None;
+    let mut host_conflict = false;
+    let mut transfer_encoding_present = false;
+    let mut transfer_encoding_invalid = false;
+    let mut transfer_encoding_last: Option<String> = None;
 
     for line in lines {
         let line = line.trim();
@@ -248,6 +258,13 @@ fn parse_request_metadata(headers: &str) -> Result<RequestMetadata, HeaderParseE
             "content-length" => {
                 content_length.add(value);
             }
+            "host" => {
+                if host_value.is_none() {
+                    host_value = Some(value.to_string());
+                } else if host_value.as_deref() != Some(value) {
+                    host_conflict = true;
+                }
+            }
             "connection" | "proxy-connection" => {
                 for token in split_header_tokens(value) {
                     match token.as_str() {
@@ -258,13 +275,40 @@ fn parse_request_metadata(headers: &str) -> Result<RequestMetadata, HeaderParseE
                 }
             }
             "transfer-encoding" => {
+                transfer_encoding_present = true;
+                let mut saw_token = false;
                 for token in split_header_tokens(value) {
+                    saw_token = true;
+                    if !is_valid_token(&token) {
+                        transfer_encoding_invalid = true;
+                    }
                     if token == "chunked" {
                         is_chunked = true;
                     }
+                    transfer_encoding_last = Some(token);
+                }
+                if !saw_token {
+                    transfer_encoding_invalid = true;
                 }
             }
             _ => {}
+        }
+    }
+
+    if host_conflict {
+        return Err(HeaderParseError::ConflictingHost);
+    }
+
+    if http_version == "HTTP/1.1" {
+        let Some(host) = host_value.as_deref() else {
+            return Err(HeaderParseError::MissingHost);
+        };
+        if !is_valid_host(host) {
+            return Err(HeaderParseError::InvalidHost);
+        }
+    } else if let Some(host) = host_value.as_deref() {
+        if !is_valid_host(host) {
+            return Err(HeaderParseError::InvalidHost);
         }
     }
 
@@ -275,6 +319,18 @@ fn parse_request_metadata(headers: &str) -> Result<RequestMetadata, HeaderParseE
             HeaderParseError::InvalidContentLength
         };
         return Err(err);
+    }
+
+    if transfer_encoding_present {
+        if transfer_encoding_invalid {
+            return Err(HeaderParseError::InvalidTransferEncoding);
+        }
+        if transfer_encoding_last.as_deref() != Some("chunked") {
+            return Err(HeaderParseError::InvalidTransferEncoding);
+        }
+        if content_length.value.is_some() {
+            return Err(HeaderParseError::TransferEncodingContentLength);
+        }
     }
 
     let close_after = if http_version == "HTTP/1.0" {
@@ -291,6 +347,32 @@ fn parse_request_metadata(headers: &str) -> Result<RequestMetadata, HeaderParseE
         close_after,
         is_chunked,
     })
+}
+
+fn is_valid_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+    if host.contains('/') || host.contains('\\') {
+        return false;
+    }
+    if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    host.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '-' | ':' | '[' | ']' | '_')
+    })
+}
+
+fn is_valid_token(token: &str) -> bool {
+    token.chars().all(|c| matches!(c,
+        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~'
+            | '0'..='9'
+            | 'a'..='z'
+            | 'A'..='Z'
+    ))
 }
 
 #[cfg(test)]
@@ -320,17 +402,23 @@ mod tests {
 
     #[test]
     fn parse_request_metadata_connection_tokens() {
-        let headers = "GET / HTTP/1.1\r\nConnection: \"keep-alive\", close\r\n\r\n";
+        let headers = "GET / HTTP/1.1\r\nHost: example\r\nConnection: \"keep-alive\", close\r\n\r\n";
         let meta = parse_request_metadata(headers).expect("expected ok");
         assert!(meta.close_after);
     }
 
     #[test]
-    fn parse_request_metadata_detects_chunked_with_tokens() {
+    fn parse_request_metadata_rejects_transfer_encoding_with_content_length() {
         let headers =
-            "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, \"chunked\"\r\nContent-Length: 10\r\n\r\n";
-        let meta = parse_request_metadata(headers).expect("expected ok");
-        assert!(meta.is_chunked);
-        assert_eq!(meta.content_length, 10);
+            "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: gzip, \"chunked\"\r\nContent-Length: 10\r\n\r\n";
+        let err = parse_request_metadata(headers).unwrap_err();
+        assert!(matches!(err, HeaderParseError::TransferEncodingContentLength));
+    }
+
+    #[test]
+    fn parse_request_metadata_rejects_missing_host_http11() {
+        let headers = "GET / HTTP/1.1\r\nUser-Agent: test\r\n\r\n";
+        let err = parse_request_metadata(headers).unwrap_err();
+        assert!(matches!(err, HeaderParseError::MissingHost));
     }
 }

@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use bytes::BytesMut;
 use migux_config::{LocationConfig, LocationType, MiguxConfig};
-use migux_http::responses::send_404;
+use migux_http::responses::send_405_with_allow;
 use migux_proxy::Proxy;
 use migux_static::serve_static_cached;
 use tokio::time::Duration;
@@ -26,6 +26,7 @@ pub(crate) async fn dispatch_location(
 ) -> anyhow::Result<bool> {
     let method = req.method.as_str();
     let path = req.path.as_str();
+    let hsts_header = build_hsts_header(server, is_tls);
 
     match location.r#type {
         LocationType::Static => {
@@ -33,9 +34,9 @@ pub(crate) async fn dispatch_location(
                 warn!(
                     target: "migux::worker",
                     %method,
-                    "Unsupported method for static file; returning 404"
+                    "Unsupported method for static file; returning 405"
                 );
-                send_404(stream).await?;
+                send_405_with_allow(stream, "GET, HEAD").await?;
                 return Ok(true);
             }
 
@@ -55,6 +56,7 @@ pub(crate) async fn dispatch_location(
                 &req.headers,
                 path,
                 keep_alive,
+                hsts_header.as_deref(),
             )
             .await?;
 
@@ -96,6 +98,7 @@ pub(crate) async fn dispatch_location(
                     req.content_length,
                     req.is_chunked,
                     is_tls,
+                    hsts_header.as_deref(),
                     cfg,
                     client_addr,
                 )
@@ -104,4 +107,22 @@ pub(crate) async fn dispatch_location(
     }
 
     Ok(false)
+}
+
+fn build_hsts_header(server: &ServerRuntime, is_tls: bool) -> Option<String> {
+    if !is_tls {
+        return None;
+    }
+
+    let tls = server.config.tls.as_ref()?;
+    let max_age = tls.hsts_max_age_secs()?;
+    if max_age == 0 {
+        return None;
+    }
+
+    let mut value = format!("max-age={}", max_age);
+    if tls.hsts_include_subdomains() {
+        value.push_str("; includeSubDomains");
+    }
+    Some(value)
 }

@@ -17,6 +17,10 @@ pub struct TlsConfig {
     pub redirect_http: bool,
     /// Enable HTTP/2 via ALPN on this TLS listener.
     pub http2: bool,
+    /// Optional HSTS max-age in seconds (None disables HSTS).
+    pub hsts_max_age_secs: Option<u64>,
+    /// Enable includeSubDomains in the HSTS header when set to true.
+    pub hsts_include_subdomains: Option<bool>,
 }
 
 impl TlsConfig {
@@ -38,5 +42,13 @@ impl TlsConfig {
 
     pub fn http2(&self) -> bool {
         self.http2
+    }
+
+    pub fn hsts_max_age_secs(&self) -> Option<u64> {
+        self.hsts_max_age_secs
+    }
+
+    pub fn hsts_include_subdomains(&self) -> bool {
+        self.hsts_include_subdomains.unwrap_or(false)
     }
 }

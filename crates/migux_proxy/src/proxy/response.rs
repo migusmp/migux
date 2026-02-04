@@ -32,6 +32,7 @@ pub(super) async fn stream_http_response<S>(
     read_timeout: Duration,
     max_headers: usize,
     max_body: usize,
+    hsts_header: Option<&str>,
 ) -> anyhow::Result<bool>
 where
     S: AsyncWrite + Unpin + ?Sized,
@@ -43,7 +44,8 @@ where
     let info = parse_response_headers(&headers_bytes[..header_len])?;
     let no_body = is_no_body(method, info.status_code);
 
-    client_stream.write_all(&headers_bytes).await?;
+    let header_out = maybe_inject_hsts(&headers_bytes, hsts_header);
+    client_stream.write_all(&header_out).await?;
 
     let mut reusable = if info.is_http10 {
         info.connection_keep_alive && !info.connection_close
@@ -74,6 +76,41 @@ where
     // Sin Content-Length y no chunked: leer hasta EOF -> no reusable
     stream_until_eof(upstream, client_stream, read_timeout, max_body).await?;
     Ok(false)
+}
+
+fn maybe_inject_hsts(headers_bytes: &[u8], hsts_header: Option<&str>) -> Vec<u8> {
+    let Some(hsts_value) = hsts_header else {
+        return headers_bytes.to_vec();
+    };
+
+    if headers_contain_hsts(headers_bytes) {
+        return headers_bytes.to_vec();
+    }
+
+    let header_len = headers_bytes.len().saturating_sub(4);
+    let mut out = Vec::with_capacity(headers_bytes.len() + hsts_value.len() + 48);
+    out.extend_from_slice(&headers_bytes[..header_len]);
+    out.extend_from_slice(b"Strict-Transport-Security: ");
+    out.extend_from_slice(hsts_value.as_bytes());
+    out.extend_from_slice(b"\r\n\r\n");
+    out
+}
+
+fn headers_contain_hsts(headers_bytes: &[u8]) -> bool {
+    let header_len = headers_bytes.len().saturating_sub(4);
+    let header_str = String::from_utf8_lossy(&headers_bytes[..header_len]);
+    for line in header_str.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, _)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("strict-transport-security") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn read_response_headers(

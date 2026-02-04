@@ -34,7 +34,10 @@ pub(crate) fn load_tls_acceptor(cfg: &TlsConfig) -> anyhow::Result<TlsAcceptor> 
     let key = load_private_key(&cfg.key_path)?;
 
     let mut config = rustls::ServerConfig::builder()
-        .with_safe_defaults()
+        .with_safe_default_cipher_suites()
+        .with_safe_default_kx_groups()
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|e| anyhow::anyhow!("Invalid TLS protocol versions: {e}"))?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| anyhow::anyhow!("Invalid TLS config: {e}"))?;

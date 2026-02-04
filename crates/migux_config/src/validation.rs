@@ -185,6 +185,23 @@ fn validate_servers(cfg: &MiguxConfig, report: &mut ConfigReport) {
                     ));
                 }
             }
+
+            if let Some(max_age) = tls.hsts_max_age_secs {
+                if max_age == 0 {
+                    report.warn(format!(
+                        "server '{name}' sets hsts_max_age_secs=0; HSTS will be ignored"
+                    ));
+                }
+                if tls.hsts_include_subdomains == Some(true) && max_age == 0 {
+                    report.warn(format!(
+                        "server '{name}' enables includeSubDomains without a positive HSTS max-age"
+                    ));
+                }
+            } else if tls.hsts_include_subdomains == Some(true) {
+                report.warn(format!(
+                    "server '{name}' enables includeSubDomains but hsts_max_age_secs is not set"
+                ));
+            }
         }
     }
 

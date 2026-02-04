@@ -49,26 +49,36 @@ impl StaticFileInfo {
 }
 
 impl ResolvedFile {
-    fn static_headers(&self) -> Vec<(&'static str, &str)> {
+    fn static_headers<'a>(&'a self, hsts: Option<&'a str>) -> Vec<(&'static str, &'a str)> {
         let mut headers = Vec::new();
         headers.push(("ETag", self.info.etag.header.as_str()));
         if let Some(last_modified) = self.info.last_modified.as_deref() {
             headers.push(("Last-Modified", last_modified));
         }
+        if let Some(hsts_value) = hsts {
+            headers.push(("Strict-Transport-Security", hsts_value));
+        }
         headers
     }
 
-    fn cache_key(&self) -> String {
-        format!("{}|{}|{}", self.path, self.len, self.info.etag.mtime_nanos)
+    fn cache_key(&self, hsts: Option<&str>) -> String {
+        let hsts_flag = if hsts.is_some() { "hsts" } else { "no-hsts" };
+        format!(
+            "{}|{}|{}|{}",
+            self.path, self.len, self.info.etag.mtime_nanos, hsts_flag
+        )
     }
 }
 
-fn build_not_modified(info: &StaticFileInfo, keep_alive: bool) -> Vec<u8> {
+fn build_not_modified(info: &StaticFileInfo, keep_alive: bool, hsts: Option<&str>) -> Vec<u8> {
     let date = fmt_http_date(SystemTime::now());
     let mut headers = Vec::new();
     headers.push(("ETag", info.etag.header.as_str()));
     if let Some(last_modified) = info.last_modified.as_deref() {
         headers.push(("Last-Modified", last_modified));
+    }
+    if let Some(hsts_value) = hsts {
+        headers.push(("Strict-Transport-Security", hsts_value));
     }
     headers.push(("Date", date.as_str()));
     ResponseBuilder::build_with_headers("304 Not Modified", None, 0, keep_alive, &headers, None)
@@ -108,12 +118,13 @@ impl<'a> StaticService<'a> {
         headers: &str,
         req_path: &str,
         keep_alive: bool,
+        hsts: Option<&str>,
     ) -> anyhow::Result<()>
     where
         S: AsyncWrite + Unpin + ?Sized,
     {
         let resp = self
-            .serve_bytes(method, headers, req_path, keep_alive)
+            .serve_bytes(method, headers, req_path, keep_alive, hsts)
             .await?;
         stream.write_all(&resp).await?;
         Ok(())
@@ -127,18 +138,19 @@ impl<'a> StaticService<'a> {
         headers: &str,
         req_path: &str,
         keep_alive: bool,
+        hsts: Option<&str>,
     ) -> anyhow::Result<()>
     where
         S: AsyncWrite + Unpin + ?Sized,
     {
         if !CachePolicy::enabled(http_cfg, self.location, method) {
             return self
-                .serve(stream, method, headers, req_path, keep_alive)
+                .serve(stream, method, headers, req_path, keep_alive, hsts)
                 .await;
         }
 
         let resp = self
-            .serve_bytes_cached(http_cfg, method, headers, req_path, keep_alive)
+            .serve_bytes_cached(http_cfg, method, headers, req_path, keep_alive, hsts)
             .await?;
         stream.write_all(&resp).await?;
         Ok(())
@@ -150,18 +162,19 @@ impl<'a> StaticService<'a> {
         headers: &str,
         req_path: &str,
         keep_alive: bool,
+        hsts: Option<&str>,
     ) -> anyhow::Result<Vec<u8>> {
         let file = match self.resolve_file(req_path, keep_alive).await? {
             FileResolution::File(file) => file,
             FileResolution::Response(resp) => return Ok(resp),
         };
 
-        if let Some(resp) = self.not_modified_response(method, headers, &file, keep_alive) {
+        if let Some(resp) = self.not_modified_response(method, headers, &file, keep_alive, hsts) {
             return Ok(resp);
         }
 
         if method == "HEAD" {
-            return Ok(self.head_response(&file, keep_alive));
+            return Ok(self.head_response(&file, keep_alive, hsts));
         }
 
         let body = match read_body(&file.path, keep_alive).await {
@@ -169,7 +182,7 @@ impl<'a> StaticService<'a> {
             Err(resp) => return Ok(resp),
         };
 
-        Ok(self.ok_response(&file, &body, keep_alive))
+        Ok(self.ok_response(&file, &body, keep_alive, hsts))
     }
 
     async fn serve_bytes_cached(
@@ -179,21 +192,22 @@ impl<'a> StaticService<'a> {
         headers: &str,
         req_path: &str,
         keep_alive: bool,
+        hsts: Option<&str>,
     ) -> anyhow::Result<Vec<u8>> {
         let file = match self.resolve_file(req_path, keep_alive).await? {
             FileResolution::File(file) => file,
             FileResolution::Response(resp) => return Ok(resp),
         };
 
-        if let Some(resp) = self.not_modified_response(method, headers, &file, keep_alive) {
+        if let Some(resp) = self.not_modified_response(method, headers, &file, keep_alive, hsts) {
             return Ok(resp);
         }
 
         if method == "HEAD" {
-            return Ok(self.head_response(&file, keep_alive));
+            return Ok(self.head_response(&file, keep_alive, hsts));
         }
 
-        let key = file.cache_key();
+        let key = file.cache_key(hsts);
 
         if let Some(resp) = MemoryCache::get(&key) {
             return Ok(resp);
@@ -220,7 +234,7 @@ impl<'a> StaticService<'a> {
             Err(resp) => return Ok(resp),
         };
 
-        let resp = self.ok_response(&file, &body, keep_alive);
+        let resp = self.ok_response(&file, &body, keep_alive, hsts);
 
         if max_obj > 0 && (body.len() as u64) <= max_obj && ttl_secs > 0 {
             MemoryCache::put(key.clone(), resp.clone(), ttl);
@@ -315,16 +329,17 @@ impl<'a> StaticService<'a> {
         headers: &str,
         file: &ResolvedFile,
         keep_alive: bool,
+        hsts: Option<&str>,
     ) -> Option<Vec<u8>> {
         if should_return_not_modified(method, headers, &file.info.etag.value) {
-            Some(build_not_modified(&file.info, keep_alive))
+            Some(build_not_modified(&file.info, keep_alive, hsts))
         } else {
             None
         }
     }
 
-    fn head_response(&self, file: &ResolvedFile, keep_alive: bool) -> Vec<u8> {
-        let extra_headers = file.static_headers();
+    fn head_response(&self, file: &ResolvedFile, keep_alive: bool, hsts: Option<&str>) -> Vec<u8> {
+        let extra_headers = file.static_headers(hsts);
         ResponseBuilder::build_with_headers(
             "200 OK",
             Some(file.content_type.as_str()),
@@ -335,8 +350,14 @@ impl<'a> StaticService<'a> {
         )
     }
 
-    fn ok_response(&self, file: &ResolvedFile, body: &[u8], keep_alive: bool) -> Vec<u8> {
-        let extra_headers = file.static_headers();
+    fn ok_response(
+        &self,
+        file: &ResolvedFile,
+        body: &[u8],
+        keep_alive: bool,
+        hsts: Option<&str>,
+    ) -> Vec<u8> {
+        let extra_headers = file.static_headers(hsts);
         ResponseBuilder::build_with_headers(
             "200 OK",
             Some(file.content_type.as_str()),
@@ -357,12 +378,13 @@ pub async fn serve_static<S>(
     headers: &str,
     req_path: &str,
     keep_alive: bool,
+    hsts: Option<&str>,
 ) -> anyhow::Result<()>
 where
     S: AsyncWrite + Unpin + ?Sized,
 {
     StaticService::new(server_cfg, location)
-        .serve(stream, method, headers, req_path, keep_alive)
+        .serve(stream, method, headers, req_path, keep_alive, hsts)
         .await
 }
 
@@ -376,12 +398,13 @@ pub async fn serve_static_cached<S>(
     headers: &str,
     req_path: &str,
     keep_alive: bool,
+    hsts: Option<&str>,
 ) -> anyhow::Result<()>
 where
     S: AsyncWrite + Unpin + ?Sized,
 {
     StaticService::new(server_cfg, location)
-        .serve_cached(stream, http_cfg, method, headers, req_path, keep_alive)
+        .serve_cached(stream, http_cfg, method, headers, req_path, keep_alive, hsts)
         .await
 }
 
@@ -393,8 +416,9 @@ pub async fn serve_static_bytes(
     headers: &str,
     req_path: &str,
     keep_alive: bool,
+    hsts: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
     StaticService::new(server_cfg, location)
-        .serve_bytes(method, headers, req_path, keep_alive)
+        .serve_bytes(method, headers, req_path, keep_alive, hsts)
         .await
 }
