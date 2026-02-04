@@ -11,16 +11,16 @@ use anyhow::Context;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Full};
+use hyper::Request;
 use hyper::body::Incoming;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
-use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::error;
 
-use crate::worker::handle_connection;
 use crate::ServerRuntime;
+use crate::worker::handle_connection;
 use migux_config::MiguxConfig;
 use migux_proxy::Proxy;
 
@@ -72,15 +72,7 @@ async fn handle_h2_request(
     };
 
     let req_bytes = build_http1_request(&parts, body_bytes.as_ref());
-    let resp_bytes = match run_http1_pipeline(
-        req_bytes,
-        client_addr,
-        servers,
-        proxy,
-        cfg,
-    )
-    .await
-    {
+    let resp_bytes = match run_http1_pipeline(req_bytes, client_addr, servers, proxy, cfg).await {
         Ok(bytes) => bytes,
         Err(e) => {
             error!(target: "migux::http2", error = ?e, "HTTP/1 pipeline failed");
@@ -109,10 +101,7 @@ async fn handle_h2_request(
         }
         Err(e) => {
             error!(target: "migux::http2", error = ?e, "Failed to parse HTTP/1 response");
-            Ok(simple_h2_response(
-                StatusCode::BAD_GATEWAY,
-                b"Bad Gateway",
-            ))
+            Ok(simple_h2_response(StatusCode::BAD_GATEWAY, b"Bad Gateway"))
         }
     }
 }
@@ -170,15 +159,8 @@ async fn run_http1_pipeline(
     let (mut client_io, server_io) = tokio::io::duplex(IN_MEMORY_STREAM_CAPACITY);
 
     let server_task = tokio::spawn(async move {
-        if let Err(e) = handle_connection(
-            Box::new(server_io),
-            client_addr,
-            servers,
-            proxy,
-            cfg,
-            true,
-        )
-        .await
+        if let Err(e) =
+            handle_connection(Box::new(server_io), client_addr, servers, proxy, cfg, true).await
         {
             error!(target: "migux::http2", error = ?e, "HTTP/1 handler error");
         }
@@ -196,9 +178,7 @@ async fn run_http1_pipeline(
 }
 
 /// Parse a raw HTTP/1 response into status, headers, and body.
-fn parse_http1_response(
-    bytes: &[u8],
-) -> anyhow::Result<(StatusCode, HeaderMap, Vec<u8>)> {
+fn parse_http1_response(bytes: &[u8]) -> anyhow::Result<(StatusCode, HeaderMap, Vec<u8>)> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut resp = httparse::Response::new(&mut headers);
     let parsed = resp.parse(bytes).context("parse http/1 response")?;
@@ -222,7 +202,10 @@ fn parse_http1_response(
             "connection" | "proxy-connection" | "keep-alive" | "upgrade" => continue,
             "transfer-encoding" => {
                 let val = String::from_utf8_lossy(value).to_ascii_lowercase();
-                if val.split(',').any(|v| v.trim().trim_matches('"') == "chunked") {
+                if val
+                    .split(',')
+                    .any(|v| v.trim().trim_matches('"') == "chunked")
+                {
                     is_chunked = true;
                 }
                 continue;
@@ -277,8 +260,8 @@ fn decode_chunked(body: &[u8]) -> anyhow::Result<Vec<u8>> {
 
         let line_str = std::str::from_utf8(line)?;
         let size_str = line_str.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_str, 16)
-            .context("invalid chunk size in chunked body")?;
+        let size =
+            usize::from_str_radix(size_str, 16).context("invalid chunk size in chunked body")?;
 
         if size == 0 {
             // Optional trailers follow; no need to parse them for our use case.

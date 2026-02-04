@@ -8,9 +8,9 @@ use migux_static::serve_static_cached;
 use tokio::time::Duration;
 use tracing::{debug, warn};
 
+use super::ClientStream;
 use super::request::ParsedRequest;
 use super::timeouts::{discard_chunked_body, discard_content_length};
-use super::ClientStream;
 use crate::ServerRuntime;
 
 pub(crate) async fn dispatch_location(

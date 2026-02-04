@@ -6,7 +6,7 @@
 use bytes::BytesMut;
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    time::{timeout, Duration},
+    time::{Duration, timeout},
 };
 use tracing::{debug, instrument, warn};
 
@@ -339,7 +339,10 @@ where
         client_stream.write_all(&line).await?;
 
         let line_str = String::from_utf8_lossy(&line);
-        let size_str = line_str.trim().trim_end_matches('\r').trim_end_matches('\n');
+        let size_str = line_str
+            .trim()
+            .trim_end_matches('\r')
+            .trim_end_matches('\n');
         let size_str = size_str.split(';').next().unwrap_or("").trim();
         let chunk_size = usize::from_str_radix(size_str, 16)
             .map_err(|_| anyhow::anyhow!("Invalid chunk size"))?;
@@ -368,11 +371,7 @@ where
 
 async fn read_line(upstream: &mut PooledStream, read_timeout: Duration) -> anyhow::Result<Vec<u8>> {
     loop {
-        if let Some(pos) = upstream
-            .read_buf
-            .windows(2)
-            .position(|w| w == b"\r\n")
-        {
+        if let Some(pos) = upstream.read_buf.windows(2).position(|w| w == b"\r\n") {
             let line = upstream.read_buf.split_to(pos + 2);
             return Ok(line.to_vec());
         }

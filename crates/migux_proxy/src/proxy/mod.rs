@@ -1,8 +1,4 @@
-use std::{
-    net::SocketAddr,
-    sync::atomic::AtomicUsize,
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc, sync::atomic::AtomicUsize};
 
 use bytes::{Buf, BytesMut};
 use dashmap::DashMap;
@@ -11,7 +7,7 @@ use migux_http::responses::send_502;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    time::{timeout, Duration},
+    time::{Duration, timeout},
 };
 use tracing::{debug, error, info, instrument};
 
@@ -22,9 +18,9 @@ mod pool;
 mod response;
 mod upstream;
 
-use health::{health_policy, UpstreamHealth};
-use pool::connect_fresh;
+use health::{UpstreamHealth, health_policy};
 use pool::PooledStream;
+use pool::connect_fresh;
 
 /// =======================================================
 /// PROXY STATE
@@ -46,7 +42,6 @@ pub struct Proxy {
     /// Health state per upstream address (circuit breaker)
     health: DashMap<String, UpstreamHealth>,
 }
-
 
 impl Proxy {
     /// Crea una nueva instancia del proxy
@@ -418,7 +413,10 @@ where
         upstream_stream.write_all(&line).await?;
 
         let line_str = String::from_utf8_lossy(&line);
-        let size_str = line_str.trim().trim_end_matches('\r').trim_end_matches('\n');
+        let size_str = line_str
+            .trim()
+            .trim_end_matches('\r')
+            .trim_end_matches('\n');
         let size_str = size_str.split(';').next().unwrap_or("").trim();
         let chunk_size = usize::from_str_radix(size_str, 16)
             .map_err(|_| anyhow::anyhow!("Invalid chunk size"))?;

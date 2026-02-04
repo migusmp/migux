@@ -4,8 +4,8 @@ use migux_http::responses::{send_400, send_408, send_413, send_431};
 use tokio::time::Duration;
 use tracing::{debug, instrument, warn};
 
-use super::timeouts::{read_more, ReadOutcome};
 use super::ClientStream;
+use super::timeouts::{ReadOutcome, read_more};
 
 /// Reads a full HTTP request:
 /// - Reads until `\r\n\r\n` (end of headers)
@@ -45,7 +45,11 @@ pub(crate) async fn read_http_request(
             return Ok(None);
         }
 
-        let timeout_dur = if buf.is_empty() { idle_timeout } else { read_timeout };
+        let timeout_dur = if buf.is_empty() {
+            idle_timeout
+        } else {
+            read_timeout
+        };
         match read_more(stream, buf, timeout_dur).await? {
             ReadOutcome::Timeout => {
                 if buf.is_empty() {
@@ -291,7 +295,7 @@ fn parse_request_metadata(headers: &str) -> Result<RequestMetadata, HeaderParseE
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_request_metadata, HeaderParseError};
+    use super::{HeaderParseError, parse_request_metadata};
 
     #[test]
     fn parse_request_metadata_accepts_duplicate_content_length() {
@@ -323,7 +327,8 @@ mod tests {
 
     #[test]
     fn parse_request_metadata_detects_chunked_with_tokens() {
-        let headers = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, \"chunked\"\r\nContent-Length: 10\r\n\r\n";
+        let headers =
+            "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, \"chunked\"\r\nContent-Length: 10\r\n\r\n";
         let meta = parse_request_metadata(headers).expect("expected ok");
         assert!(meta.is_chunked);
         assert_eq!(meta.content_length, 10);

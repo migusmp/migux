@@ -5,7 +5,7 @@ use std::time::Instant;
 use bytes::BytesMut;
 use tokio::{
     net::TcpStream,
-    time::{timeout, Duration},
+    time::{Duration, timeout},
 };
 use tracing::{debug, info, instrument};
 
@@ -58,7 +58,12 @@ impl Proxy {
     }
 
     /// Returns an upstream connection back to the pool so it can be reused.
-    pub(super) fn checkin_upstream_stream(&self, addr: &str, mut pooled: PooledStream, max_pool: usize) {
+    pub(super) fn checkin_upstream_stream(
+        &self,
+        addr: &str,
+        mut pooled: PooledStream,
+        max_pool: usize,
+    ) {
         pooled.last_used = Instant::now();
         let mut entry = self.pools.entry(addr.to_string()).or_insert_with(Vec::new);
         if entry.len() >= max_pool {
@@ -72,13 +77,19 @@ impl Proxy {
 }
 
 /// Create a fresh upstream connection (used when a pooled socket is dead).
-pub(super) async fn connect_fresh(addr: &str, timeout_dur: Duration) -> anyhow::Result<PooledStream> {
+pub(super) async fn connect_fresh(
+    addr: &str,
+    timeout_dur: Duration,
+) -> anyhow::Result<PooledStream> {
     let stream = connect_with_timeout(addr, timeout_dur).await?;
     Ok(PooledStream::new(stream))
 }
 
 /// Connect to an upstream with a timeout.
-pub(super) async fn connect_with_timeout(addr: &str, timeout_dur: Duration) -> anyhow::Result<TcpStream> {
+pub(super) async fn connect_with_timeout(
+    addr: &str,
+    timeout_dur: Duration,
+) -> anyhow::Result<TcpStream> {
     match timeout(timeout_dur, TcpStream::connect(addr)).await {
         Ok(res) => Ok(res?),
         Err(_) => anyhow::bail!("Upstream connect timeout to {}", addr),

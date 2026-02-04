@@ -1,6 +1,6 @@
 use bytes::{Buf, BytesMut};
 use tokio::io::AsyncReadExt;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use super::ClientStream;
 

@@ -6,8 +6,8 @@ use migux_config::{MiguxConfig, UpstreamConfig};
 use tokio::time::interval;
 use tracing::warn;
 
-use super::{upstream, Proxy};
 use super::pool::connect_with_timeout;
+use super::{Proxy, upstream};
 
 /// Health policy derived from upstream configuration.
 #[derive(Debug, Clone)]
@@ -82,11 +82,7 @@ impl Proxy {
                 healthy.push(addr.clone());
             }
         }
-        if healthy.is_empty() {
-            addrs
-        } else {
-            healthy
-        }
+        if healthy.is_empty() { addrs } else { healthy }
     }
 
     fn is_healthy(&self, upstream_name: &str, addr: &str, now: Instant) -> bool {
@@ -149,7 +145,7 @@ fn health_key(upstream_name: &str, addr: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{health_key, HealthPolicy, Proxy, UpstreamHealth};
+    use super::{HealthPolicy, Proxy, UpstreamHealth, health_key};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -160,10 +156,7 @@ mod tests {
             cooldown: Duration::from_secs(60),
         };
         proxy.record_failure("api", "127.0.0.1:3000", &policy);
-        let addrs = vec![
-            "127.0.0.1:3000".to_string(),
-            "127.0.0.1:3001".to_string(),
-        ];
+        let addrs = vec!["127.0.0.1:3000".to_string(), "127.0.0.1:3001".to_string()];
         let filtered = proxy.filter_healthy_addrs("api", addrs);
         assert_eq!(filtered, vec!["127.0.0.1:3001".to_string()]);
     }
@@ -177,10 +170,7 @@ mod tests {
         };
         proxy.record_failure("api", "127.0.0.1:3000", &policy);
         proxy.record_failure("api", "127.0.0.1:3001", &policy);
-        let addrs = vec![
-            "127.0.0.1:3000".to_string(),
-            "127.0.0.1:3001".to_string(),
-        ];
+        let addrs = vec!["127.0.0.1:3000".to_string(), "127.0.0.1:3001".to_string()];
         let filtered = proxy.filter_healthy_addrs("api", addrs.clone());
         assert_eq!(filtered, addrs);
     }
