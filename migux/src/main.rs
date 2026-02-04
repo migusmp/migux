@@ -14,6 +14,19 @@ async fn main() -> anyhow::Result<()> {
             MiguxConfig::default()
         }
     };
+
+    let report = cfg.validate();
+    for warning in report.warnings() {
+        eprintln!("WARNING: {warning}");
+    }
+    if report.has_errors() {
+        eprintln!("Invalid configuration:");
+        for error in report.errors() {
+            eprintln!("  - {error}");
+        }
+        return Err(anyhow::anyhow!("invalid configuration"));
+    }
+
     let master = Master::new(cfg);
     master.run().await?;
 

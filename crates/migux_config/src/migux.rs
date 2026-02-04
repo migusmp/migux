@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::{GlobalConfig, HttpConfig, LocationConfig, ServerConfig, UpstreamConfig};
+use crate::validation::{validate, ConfigReport};
 
 // =======================================================
 // MIGUX CONFIG — main config
@@ -76,6 +77,11 @@ impl MiguxConfig {
         self.location.get(name)
     }
 
+    /// Validate the configuration and return a report of warnings and errors.
+    pub fn validate(&self) -> ConfigReport {
+        validate(self)
+    }
+
     pub fn from_file(file_name: &str) -> Result<Self, config::ConfigError> {
         let built = config::Config::builder()
             .add_source(config::File::new(file_name, config::FileFormat::Ini).required(false))
@@ -89,7 +95,21 @@ impl MiguxConfig {
 
     pub fn from_file_or_default(file_name: &str) -> Self {
         match Self::from_file(file_name) {
-            Ok(cfg) => cfg,
+            Ok(cfg) => {
+                let report = cfg.validate();
+                if report.has_errors() {
+                    eprintln!("⚠️  Invalid config in '{file_name}':");
+                    eprintln!("{}", report.format());
+                    eprintln!("➡️  Using default config(in-memory)...");
+                    MiguxConfig::default()
+                } else {
+                    if !report.warnings().is_empty() {
+                        eprintln!("⚠️  Config warnings in '{file_name}':");
+                        eprintln!("{}", report.format());
+                    }
+                    cfg
+                }
+            }
             Err(e) => {
                 eprintln!("⚠️  Error reading config'{file_name}': {e}");
                 eprintln!("➡️  Using default config(in-memory)...");
