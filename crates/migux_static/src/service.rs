@@ -2,11 +2,13 @@ use httpdate::fmt_http_date;
 use mime_guess::mime;
 use std::time::{Duration, SystemTime};
 use tokio::fs as tokio_fs;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 
 use migux_config::{HttpConfig, LocationConfig, ServerConfig};
 
-use crate::cache::{CachePolicy, DiskCache, MemoryCache};
+use crate::cache::{
+    build_cache_key, cache_metrics_snapshot, CacheKey, CachePolicy, DiskCache, MemoryCache,
+};
 use crate::conditional::should_return_not_modified;
 use crate::etag::{EtagInfo, last_modified_header, weak_etag_size_mtime};
 use crate::fs::PathResolver;
@@ -29,6 +31,8 @@ struct ResolvedFile {
     info: StaticFileInfo,
     content_type: String,
 }
+
+const DEFAULT_STREAM_THRESHOLD_BYTES: u64 = 1024 * 1024;
 
 enum FileResolution {
     File(ResolvedFile),
@@ -61,11 +65,13 @@ impl ResolvedFile {
         headers
     }
 
-    fn cache_key(&self, hsts: Option<&str>) -> String {
-        let hsts_flag = if hsts.is_some() { "hsts" } else { "no-hsts" };
-        format!(
-            "{}|{}|{}|{}",
-            self.path, self.len, self.info.etag.mtime_nanos, hsts_flag
+    fn cache_key(&self, hsts: Option<&str>) -> CacheKey {
+        let hsts_flag = hsts.is_some();
+        build_cache_key(
+            self.path.as_str(),
+            self.len,
+            self.info.etag.mtime_nanos,
+            hsts_flag,
         )
     }
 }
@@ -85,12 +91,67 @@ fn build_not_modified(info: &StaticFileInfo, keep_alive: bool, hsts: Option<&str
 }
 
 fn content_type_for_path(path: &str) -> String {
+    if let Some(ext) = std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+    {
+        if let Some(ct) = fast_content_type(ext) {
+            return ct.to_string();
+        }
+    }
+
     let mime = mime_guess::from_path(path).first_or_octet_stream();
     if mime.type_() == mime::TEXT {
         format!("{}; charset=utf-8", mime.essence_str())
     } else {
         mime.essence_str().to_string()
     }
+}
+
+fn fast_content_type(ext: &str) -> Option<&'static str> {
+    if ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm") {
+        return Some("text/html; charset=utf-8");
+    }
+    if ext.eq_ignore_ascii_case("css") {
+        return Some("text/css; charset=utf-8");
+    }
+    if ext.eq_ignore_ascii_case("js") || ext.eq_ignore_ascii_case("mjs") {
+        return Some("text/javascript; charset=utf-8");
+    }
+    if ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("map") {
+        return Some("application/json; charset=utf-8");
+    }
+    if ext.eq_ignore_ascii_case("txt") {
+        return Some("text/plain; charset=utf-8");
+    }
+    if ext.eq_ignore_ascii_case("svg") {
+        return Some("image/svg+xml");
+    }
+    if ext.eq_ignore_ascii_case("png") {
+        return Some("image/png");
+    }
+    if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") {
+        return Some("image/jpeg");
+    }
+    if ext.eq_ignore_ascii_case("gif") {
+        return Some("image/gif");
+    }
+    if ext.eq_ignore_ascii_case("webp") {
+        return Some("image/webp");
+    }
+    if ext.eq_ignore_ascii_case("ico") {
+        return Some("image/x-icon");
+    }
+    if ext.eq_ignore_ascii_case("wasm") {
+        return Some("application/wasm");
+    }
+    if ext.eq_ignore_ascii_case("woff") {
+        return Some("font/woff");
+    }
+    if ext.eq_ignore_ascii_case("woff2") {
+        return Some("font/woff2");
+    }
+    None
 }
 
 async fn read_body(path: &str, keep_alive: bool) -> Result<Vec<u8>, Vec<u8>> {
@@ -123,9 +184,59 @@ impl<'a> StaticService<'a> {
     where
         S: AsyncWrite + Unpin + ?Sized,
     {
-        let resp = self
-            .serve_bytes(method, headers, req_path, keep_alive, hsts)
-            .await?;
+        self.serve_uncached(stream, None, method, headers, req_path, keep_alive, hsts)
+            .await
+    }
+
+    async fn serve_uncached<S>(
+        &self,
+        stream: &mut S,
+        http_cfg: Option<&HttpConfig>,
+        method: &str,
+        headers: &str,
+        req_path: &str,
+        keep_alive: bool,
+        hsts: Option<&str>,
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncWrite + Unpin + ?Sized,
+    {
+        let file = match self.resolve_file(req_path, keep_alive).await? {
+            FileResolution::File(file) => file,
+            FileResolution::Response(resp) => {
+                stream.write_all(&resp).await?;
+                return Ok(());
+            }
+        };
+
+        if let Some(resp) = self.not_modified_response(method, headers, &file, keep_alive, hsts) {
+            stream.write_all(&resp).await?;
+            return Ok(());
+        }
+
+        if method == "HEAD" {
+            let resp = self.head_response(&file, keep_alive, hsts);
+            stream.write_all(&resp).await?;
+            return Ok(());
+        }
+
+        let threshold = http_cfg
+            .map(stream_threshold_bytes)
+            .unwrap_or(DEFAULT_STREAM_THRESHOLD_BYTES);
+        if should_stream_file(file.len, threshold) {
+            self.stream_file_response(stream, &file, keep_alive, hsts)
+                .await?;
+            return Ok(());
+        }
+
+        let body = match read_body(&file.path, keep_alive).await {
+            Ok(body) => body,
+            Err(resp) => {
+                stream.write_all(&resp).await?;
+                return Ok(());
+            }
+        };
+        let resp = self.ok_response(&file, &body, keep_alive, hsts);
         stream.write_all(&resp).await?;
         Ok(())
     }
@@ -145,12 +256,46 @@ impl<'a> StaticService<'a> {
     {
         if !CachePolicy::enabled(http_cfg, self.location, method) {
             return self
-                .serve(stream, method, headers, req_path, keep_alive, hsts)
+                .serve_uncached(
+                    stream,
+                    Some(http_cfg),
+                    method,
+                    headers,
+                    req_path,
+                    keep_alive,
+                    hsts,
+                )
                 .await;
         }
 
+        let file = match self.resolve_file(req_path, keep_alive).await? {
+            FileResolution::File(file) => file,
+            FileResolution::Response(resp) => {
+                stream.write_all(&resp).await?;
+                return Ok(());
+            }
+        };
+
+        if let Some(resp) = self.not_modified_response(method, headers, &file, keep_alive, hsts) {
+            stream.write_all(&resp).await?;
+            return Ok(());
+        }
+
+        if method == "HEAD" {
+            let resp = self.head_response(&file, keep_alive, hsts);
+            stream.write_all(&resp).await?;
+            return Ok(());
+        }
+
+        let stream_threshold = stream_threshold_bytes(http_cfg);
+        if should_stream_file(file.len, stream_threshold) {
+            self.stream_file_response(stream, &file, keep_alive, hsts)
+                .await?;
+            return Ok(());
+        }
+
         let resp = self
-            .serve_bytes_cached(http_cfg, method, headers, req_path, keep_alive, hsts)
+            .serve_bytes_cached_for_file(http_cfg, method, headers, file, keep_alive, hsts)
             .await?;
         stream.write_all(&resp).await?;
         Ok(())
@@ -185,20 +330,15 @@ impl<'a> StaticService<'a> {
         Ok(self.ok_response(&file, &body, keep_alive, hsts))
     }
 
-    async fn serve_bytes_cached(
+    async fn serve_bytes_cached_for_file(
         &self,
         http_cfg: &HttpConfig,
         method: &str,
         headers: &str,
-        req_path: &str,
+        file: ResolvedFile,
         keep_alive: bool,
         hsts: Option<&str>,
     ) -> anyhow::Result<Vec<u8>> {
-        let file = match self.resolve_file(req_path, keep_alive).await? {
-            FileResolution::File(file) => file,
-            FileResolution::Response(resp) => return Ok(resp),
-        };
-
         if let Some(resp) = self.not_modified_response(method, headers, &file, keep_alive, hsts) {
             return Ok(resp);
         }
@@ -209,7 +349,7 @@ impl<'a> StaticService<'a> {
 
         let key = file.cache_key(hsts);
 
-        if let Some(resp) = MemoryCache::get(&key) {
+        if let Some(resp) = MemoryCache::get(key) {
             return Ok(resp);
         }
 
@@ -219,9 +359,9 @@ impl<'a> StaticService<'a> {
 
         if let Some(cache_dir) = http_cfg.cache_dir() {
             let disk_cache = DiskCache::new(cache_dir);
-            if let Some(resp) = disk_cache.get(&key).await {
+            if let Some(resp) = disk_cache.get(key).await {
                 if ttl_secs > 0 {
-                    MemoryCache::put(key.clone(), resp.clone(), ttl);
+                    MemoryCache::put(key, resp.clone(), ttl);
                 }
                 return Ok(resp);
             }
@@ -237,15 +377,20 @@ impl<'a> StaticService<'a> {
         let resp = self.ok_response(&file, &body, keep_alive, hsts);
 
         if max_obj > 0 && (body.len() as u64) <= max_obj && ttl_secs > 0 {
-            MemoryCache::put(key.clone(), resp.clone(), ttl);
+            MemoryCache::put(key, resp.clone(), ttl);
             if let Some(cache_dir) = http_cfg.cache_dir() {
-                DiskCache::new(cache_dir).put(&key, &resp, ttl).await;
+                DiskCache::new(cache_dir).put(key, &resp, ttl).await;
             }
+            let metrics = cache_metrics_snapshot();
             tracing::debug!(
                 target: "migux::static_cache",
                 cache_key = %key,
                 bytes = body.len(),
                 ttl_secs = ttl_secs,
+                memory_hits = metrics.memory_hits,
+                memory_misses = metrics.memory_misses,
+                disk_hits = metrics.disk_hits,
+                disk_misses = metrics.disk_misses,
                 "Cached static response"
             );
         } else if max_obj > 0 && ttl_secs > 0 {
@@ -367,6 +512,62 @@ impl<'a> StaticService<'a> {
             Some(body),
         )
     }
+
+    async fn stream_file_response<S>(
+        &self,
+        stream: &mut S,
+        file: &ResolvedFile,
+        keep_alive: bool,
+        hsts: Option<&str>,
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncWrite + Unpin + ?Sized,
+    {
+        let mut handle = match tokio_fs::File::open(&file.path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let resp = ResponseBuilder::not_found(keep_alive);
+                stream.write_all(&resp).await?;
+                return Ok(());
+            }
+            Err(_) => {
+                let resp = ResponseBuilder::internal_error(keep_alive);
+                stream.write_all(&resp).await?;
+                return Ok(());
+            }
+        };
+
+        let extra_headers = file.static_headers(hsts);
+        let head = ResponseBuilder::build_with_headers(
+            "200 OK",
+            Some(file.content_type.as_str()),
+            file.info.content_length,
+            keep_alive,
+            &extra_headers,
+            None,
+        );
+        stream.write_all(&head).await?;
+        io::copy(&mut handle, stream).await?;
+        Ok(())
+    }
+}
+
+fn stream_threshold_bytes(http_cfg: &HttpConfig) -> u64 {
+    let max_obj = http_cfg.cache_max_object_bytes().unwrap_or(0);
+    let base = if max_obj == 0 {
+        DEFAULT_STREAM_THRESHOLD_BYTES
+    } else {
+        max_obj
+    };
+    if http_cfg.sendfile() {
+        base
+    } else {
+        base.saturating_mul(4)
+    }
+}
+
+fn should_stream_file(len: u64, threshold: u64) -> bool {
+    len >= threshold
 }
 
 /// Serve a static file directly to the client stream.

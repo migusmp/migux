@@ -10,4 +10,5 @@ mod fs;
 mod response;
 mod service;
 
+pub use cache::{cache_metrics_snapshot, CacheMetrics};
 pub use service::{serve_static, serve_static_bytes, serve_static_cached};

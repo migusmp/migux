@@ -4,7 +4,10 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -27,32 +30,81 @@ impl CacheEntry {
     }
 }
 
+/// Compact hash key for cache entries.
+pub(crate) type CacheKey = u64;
+
+/// Cache hit/miss counters for quick tuning.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheMetrics {
+    pub memory_hits: u64,
+    pub memory_misses: u64,
+    pub disk_hits: u64,
+    pub disk_misses: u64,
+}
+
+static MEMORY_HITS: AtomicU64 = AtomicU64::new(0);
+static MEMORY_MISSES: AtomicU64 = AtomicU64::new(0);
+static DISK_HITS: AtomicU64 = AtomicU64::new(0);
+static DISK_MISSES: AtomicU64 = AtomicU64::new(0);
+
 /// Global in-memory cache map for static responses.
-static STATIC_CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
+static STATIC_CACHE: OnceLock<Mutex<HashMap<CacheKey, CacheEntry>>> = OnceLock::new();
+
+/// Build a compact cache key from file attributes.
+pub(crate) fn build_cache_key(
+    path: &str,
+    len: u64,
+    mtime_nanos: u128,
+    hsts: bool,
+) -> CacheKey {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    len.hash(&mut hasher);
+    mtime_nanos.hash(&mut hasher);
+    hsts.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Snapshot current cache hit/miss counters.
+pub fn cache_metrics_snapshot() -> CacheMetrics {
+    CacheMetrics {
+        memory_hits: MEMORY_HITS.load(Ordering::Relaxed),
+        memory_misses: MEMORY_MISSES.load(Ordering::Relaxed),
+        disk_hits: DISK_HITS.load(Ordering::Relaxed),
+        disk_misses: DISK_MISSES.load(Ordering::Relaxed),
+    }
+}
 
 pub(crate) struct MemoryCache;
 
 impl MemoryCache {
     /// Get a reference to the global cache store.
-    fn store() -> &'static Mutex<HashMap<String, CacheEntry>> {
+    fn store() -> &'static Mutex<HashMap<CacheKey, CacheEntry>> {
         STATIC_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
     /// Fetch a cached response from memory, honoring expiration.
-    pub(crate) fn get(key: &str) -> Option<Vec<u8>> {
+    pub(crate) fn get(key: CacheKey) -> Option<Vec<u8>> {
         let mut map = Self::store().lock().ok()?;
-        if let Some(entry) = map.get(key) {
+        if let Some(entry) = map.get(&key) {
             if Instant::now() <= entry.expires_at {
-                debug!(target: "migux::static_cache", cache_key = %key, layer = "memory", "Cache hit");
+                MEMORY_HITS.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    target: "migux::static_cache",
+                    cache_key = %key,
+                    layer = "memory",
+                    "Cache hit"
+                );
                 return Some(entry.response.clone());
             }
         }
-        map.remove(key);
+        map.remove(&key);
+        MEMORY_MISSES.fetch_add(1, Ordering::Relaxed);
         None
     }
 
     /// Store a response in memory with a TTL.
-    pub(crate) fn put(key: String, response: Vec<u8>, ttl: Duration) {
+    pub(crate) fn put(key: CacheKey, response: Vec<u8>, ttl: Duration) {
         if ttl.as_secs() == 0 {
             return;
         }
@@ -77,19 +129,45 @@ impl DiskCache {
     }
 
     /// Read a cached response from disk if present and not expired.
-    pub(crate) async fn get(&self, key: &str) -> Option<Vec<u8>> {
+    pub(crate) async fn get(&self, key: CacheKey) -> Option<Vec<u8>> {
         let (data_path, meta_path) = self.cache_paths(key);
-        let meta_bytes = fs::read(&meta_path).await.ok()?;
-        let meta_str = std::str::from_utf8(&meta_bytes).ok()?.trim();
-        let expires_at = meta_str.parse::<u64>().ok()?;
+        let meta_bytes = match fs::read(&meta_path).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                DISK_MISSES.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
+        let meta_str = match std::str::from_utf8(&meta_bytes) {
+            Ok(s) => s.trim(),
+            Err(_) => {
+                DISK_MISSES.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
+        let expires_at = match meta_str.parse::<u64>() {
+            Ok(val) => val,
+            Err(_) => {
+                DISK_MISSES.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
         if now > expires_at {
             let _ = fs::remove_file(&data_path).await;
             let _ = fs::remove_file(&meta_path).await;
+            DISK_MISSES.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
-        let data = fs::read(&data_path).await.ok()?;
+        let data = match fs::read(&data_path).await {
+            Ok(data) => data,
+            Err(_) => {
+                DISK_MISSES.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
+        DISK_HITS.fetch_add(1, Ordering::Relaxed);
         debug!(
             target: "migux::static_cache",
             cache_key = %key,
@@ -100,7 +178,7 @@ impl DiskCache {
     }
 
     /// Persist a cached response and its expiration metadata to disk.
-    pub(crate) async fn put(&self, key: &str, response: &[u8], ttl: Duration) {
+    pub(crate) async fn put(&self, key: CacheKey, response: &[u8], ttl: Duration) {
         if ttl.as_secs() == 0 {
             return;
         }
@@ -121,20 +199,12 @@ impl DiskCache {
     }
 
     /// Resolve disk paths for a cache entry and its metadata file.
-    fn cache_paths(&self, key: &str) -> (PathBuf, PathBuf) {
-        let hash = Self::cache_key_hash(key);
+    fn cache_paths(&self, key: CacheKey) -> (PathBuf, PathBuf) {
         let mut data = self.cache_dir.clone();
         let mut meta = self.cache_dir.clone();
-        data.push(format!("{:016x}.cache", hash));
-        meta.push(format!("{:016x}.meta", hash));
+        data.push(format!("{:016x}.cache", key));
+        meta.push(format!("{:016x}.meta", key));
         (data, meta)
-    }
-
-    /// Hash a cache key to a stable filename.
-    fn cache_key_hash(key: &str) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
     }
 }
 

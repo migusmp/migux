@@ -6,7 +6,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, BytesMut};
-use migux_http::responses::{send_404, send_redirect};
+use migux_http::responses::{send_404, send_405_with_allow, send_redirect, send_response};
+use migux_static::cache_metrics_snapshot;
 use migux_proxy::Proxy;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Duration;
@@ -22,7 +23,7 @@ mod routing;
 mod timeouts;
 
 use dispatch::dispatch_location;
-use request::{extract_host_header, read_http_request};
+use request::{extract_host_header, read_http_request, ParsedRequest};
 use routing::{match_location, select_default_server};
 
 pub trait ClientStream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -76,6 +77,10 @@ pub async fn handle_connection(
             %path,
             "Parsed HTTP request line"
         );
+
+        if maybe_handle_cache_metrics(&mut stream, &req, client_addr).await? {
+            break;
+        }
 
         // 3) Select server for this connection
         let server = select_default_server(&servers);
@@ -154,6 +159,57 @@ pub async fn handle_connection(
     );
 
     Ok(())
+}
+
+const CACHE_METRICS_PATH: &str = "/_migux/cache";
+
+fn strip_query(path: &str) -> &str {
+    path.split('?').next().unwrap_or(path)
+}
+
+async fn maybe_handle_cache_metrics(
+    stream: &mut dyn ClientStream,
+    req: &ParsedRequest,
+    client_addr: SocketAddr,
+) -> anyhow::Result<bool> {
+    let mut path = strip_query(req.path.as_str());
+    if path.len() > 1 {
+        path = path.trim_end_matches('/');
+    }
+
+    if path != CACHE_METRICS_PATH {
+        return Ok(false);
+    }
+
+    if !client_addr.ip().is_loopback() {
+        send_404(stream).await?;
+        return Ok(true);
+    }
+
+    if req.method != "GET" && req.method != "HEAD" {
+        send_405_with_allow(stream, "GET, HEAD").await?;
+        return Ok(true);
+    }
+
+    let body = if req.method == "HEAD" {
+        String::new()
+    } else {
+        let metrics = cache_metrics_snapshot();
+        format!(
+            "{{\"memory_hits\":{},\"memory_misses\":{},\"disk_hits\":{},\"disk_misses\":{}}}",
+            metrics.memory_hits, metrics.memory_misses, metrics.disk_hits, metrics.disk_misses
+        )
+    };
+
+    send_response(
+        stream,
+        "200 OK",
+        "application/json; charset=utf-8",
+        body.as_bytes(),
+    )
+    .await?;
+
+    Ok(true)
 }
 
 fn build_https_redirect(host: &str, path: &str, tls_listen: &str) -> String {
