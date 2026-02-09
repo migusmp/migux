@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::validation::{ConfigReport, validate};
 use crate::{GlobalConfig, HttpConfig, LocationConfig, ServerConfig, UpstreamConfig};
-use crate::validation::{validate, ConfigReport};
 
 // =======================================================
 // MIGUX CONFIG — main config
@@ -216,6 +216,26 @@ impl MiguxConfig {
         println!(
             "  cache_max_object_bytes       = {:?}",
             self.http.cache_max_object_bytes
+        );
+        println!(
+            "  cache_max_total_bytes        = {:?}",
+            self.http.cache_max_total_bytes
+        );
+        println!(
+            "  cache_max_entries            = {:?}",
+            self.http.cache_max_entries
+        );
+        println!(
+            "  cache_eviction_policy        = {:?}",
+            self.http.cache_eviction_policy()
+        );
+        println!(
+            "  cache_max_ttl_secs            = {:?}",
+            self.http.cache_max_ttl_secs
+        );
+        println!(
+            "  cache_inactive_secs           = {:?}",
+            self.http.cache_inactive_secs
         );
     }
 

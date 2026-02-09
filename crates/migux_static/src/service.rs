@@ -7,7 +7,7 @@ use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 use migux_config::{HttpConfig, LocationConfig, ServerConfig};
 
 use crate::cache::{
-    build_cache_key, cache_metrics_snapshot, CacheKey, CachePolicy, DiskCache, MemoryCache,
+    CacheKey, CachePolicy, DiskCache, MemoryCache, build_cache_key, cache_metrics_snapshot,
 };
 use crate::conditional::should_return_not_modified;
 use crate::etag::{EtagInfo, last_modified_header, weak_etag_size_mtime};
@@ -350,16 +350,22 @@ impl<'a> StaticService<'a> {
         let key = file.cache_key(hsts);
 
         if let Some(resp) = MemoryCache::get(key) {
+            if let Some(cache_dir) = http_cfg.cache_dir() {
+                DiskCache::new(cache_dir).touch(http_cfg, key).await;
+            }
             return Ok(resp);
         }
 
         let max_obj = http_cfg.cache_max_object_bytes().unwrap_or(0);
-        let ttl_secs = http_cfg.cache_default_ttl_secs().unwrap_or(0) as u64;
+        let mut ttl_secs = http_cfg.cache_default_ttl_secs().unwrap_or(0) as u64;
+        if let Some(max_ttl) = http_cfg.cache_max_ttl_secs().filter(|v| *v > 0) {
+            ttl_secs = ttl_secs.min(max_ttl);
+        }
         let ttl = Duration::from_secs(ttl_secs);
 
         if let Some(cache_dir) = http_cfg.cache_dir() {
             let disk_cache = DiskCache::new(cache_dir);
-            if let Some(resp) = disk_cache.get(key).await {
+            if let Some(resp) = disk_cache.get(http_cfg, key).await {
                 if ttl_secs > 0 {
                     MemoryCache::put(key, resp.clone(), ttl);
                 }
@@ -379,9 +385,11 @@ impl<'a> StaticService<'a> {
         if max_obj > 0 && (body.len() as u64) <= max_obj && ttl_secs > 0 {
             MemoryCache::put(key, resp.clone(), ttl);
             if let Some(cache_dir) = http_cfg.cache_dir() {
-                DiskCache::new(cache_dir).put(key, &resp, ttl).await;
+                DiskCache::new(cache_dir)
+                    .put(http_cfg, key, &resp, ttl)
+                    .await;
             }
-            let metrics = cache_metrics_snapshot();
+            let metrics = cache_metrics_snapshot().await;
             tracing::debug!(
                 target: "migux::static_cache",
                 cache_key = %key,
@@ -605,7 +613,9 @@ where
     S: AsyncWrite + Unpin + ?Sized,
 {
     StaticService::new(server_cfg, location)
-        .serve_cached(stream, http_cfg, method, headers, req_path, keep_alive, hsts)
+        .serve_cached(
+            stream, http_cfg, method, headers, req_path, keep_alive, hsts,
+        )
         .await
 }
 

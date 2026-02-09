@@ -34,6 +34,7 @@ Client requests support `Content-Length` and `Transfer-Encoding: chunked`.
 ## Configuration (`migux.conf`)
 
 Format is INI-like using sections.
+See `migux.conf.example` for a full configuration you can copy and customize.
 
 ### Minimal working example config
 
@@ -104,6 +105,11 @@ proxy_pool_idle_timeout_secs = 60
 cache_dir = "/var/cache/migux"
 cache_default_ttl_secs = 30
 cache_max_object_bytes = 1048576
+cache_max_total_bytes = 5368709120
+cache_max_entries = 100000
+cache_eviction_policy = "lru"
+cache_max_ttl_secs = 3600
+cache_inactive_secs = 86400
 
 # -------- upstreams --------
 [upstream.app]
@@ -221,6 +227,7 @@ curl --http2 -k https://localhost:8443/
 - Uses MIME type detection.
  - Respects HTTP/1 keep-alive (`Connection: keep-alive` / `close`).
 - Disk-backed cache (optional): stores `.cache` and `.meta` files under `cache_dir` and also keeps a memory copy for hot hits.
+- Cache supports TTL, global size cap, and LRU eviction on disk.
 
 ## Error responses
 

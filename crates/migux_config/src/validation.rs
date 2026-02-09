@@ -101,6 +101,33 @@ fn validate_http_cache(cfg: &MiguxConfig, report: &mut ConfigReport) {
     if cfg.http.cache_max_object_bytes.unwrap_or(0) == 0 {
         report.warn("http.cache_max_object_bytes is 0; cache is effectively disabled");
     }
+
+    if cfg.http.cache_max_total_bytes == Some(0) {
+        report.warn("http.cache_max_total_bytes is 0; global cache size cap is disabled");
+    }
+
+    if cfg.http.cache_max_entries == Some(0) {
+        report.warn("http.cache_max_entries is 0; entry cap is disabled");
+    }
+
+    if let (Some(total), Some(max_obj)) = (
+        cfg.http.cache_max_total_bytes,
+        cfg.http.cache_max_object_bytes,
+    ) {
+        if total > 0 && max_obj > total {
+            report.warn(
+                "http.cache_max_object_bytes exceeds cache_max_total_bytes; oversized objects will never be cached",
+            );
+        }
+    }
+
+    if cfg.http.cache_max_ttl_secs == Some(0) {
+        report.warn("http.cache_max_ttl_secs is 0; TTL clamp is disabled");
+    }
+
+    if cfg.http.cache_inactive_secs == Some(0) {
+        report.warn("http.cache_inactive_secs is 0; inactive eviction is disabled");
+    }
 }
 
 fn validate_upstreams(cfg: &MiguxConfig, report: &mut ConfigReport) {
@@ -288,9 +315,7 @@ fn validate_locations(cfg: &MiguxConfig, report: &mut ConfigReport) {
 
         if location.cache == Some(true) {
             if !matches!(&location.r#type, LocationType::Static) {
-                report.warn(format!(
-                    "location '{name}' enables cache but is not static"
-                ));
+                report.warn(format!("location '{name}' enables cache but is not static"));
             }
         }
     }

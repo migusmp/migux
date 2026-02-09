@@ -7,8 +7,8 @@ use std::{net::SocketAddr, sync::Arc};
 
 use bytes::{Buf, BytesMut};
 use migux_http::responses::{send_404, send_405_with_allow, send_redirect, send_response};
-use migux_static::cache_metrics_snapshot;
 use migux_proxy::Proxy;
+use migux_static::cache_metrics_snapshot;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Duration;
 use tracing::{debug, info, instrument, warn};
@@ -23,7 +23,7 @@ mod routing;
 mod timeouts;
 
 use dispatch::dispatch_location;
-use request::{extract_host_header, read_http_request, ParsedRequest};
+use request::{ParsedRequest, extract_host_header, read_http_request};
 use routing::{match_location, select_default_server};
 
 pub trait ClientStream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -194,10 +194,17 @@ async fn maybe_handle_cache_metrics(
     let body = if req.method == "HEAD" {
         String::new()
     } else {
-        let metrics = cache_metrics_snapshot();
+        let metrics = cache_metrics_snapshot().await;
         format!(
-            "{{\"memory_hits\":{},\"memory_misses\":{},\"disk_hits\":{},\"disk_misses\":{}}}",
-            metrics.memory_hits, metrics.memory_misses, metrics.disk_hits, metrics.disk_misses
+            "{{\"memory_hits\":{},\"memory_misses\":{},\"disk_hits\":{},\"disk_misses\":{},\"disk_evictions\":{},\"disk_evicted_bytes\":{},\"disk_bytes\":{},\"disk_entries\":{}}}",
+            metrics.memory_hits,
+            metrics.memory_misses,
+            metrics.disk_hits,
+            metrics.disk_misses,
+            metrics.disk_evictions,
+            metrics.disk_evicted_bytes,
+            metrics.disk_bytes,
+            metrics.disk_entries
         )
     };
 

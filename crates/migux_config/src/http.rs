@@ -1,5 +1,11 @@
 use serde::Deserialize;
 
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheEvictionPolicy {
+    Lru,
+}
+
 // =======================================================
 // HTTP CONFIG + DEFAULTS
 // =======================================================
@@ -33,6 +39,16 @@ pub struct HttpConfig {
     pub cache_default_ttl_secs: Option<u32>,
     /// Maximum size in bytes for a cached static object (optional).
     pub cache_max_object_bytes: Option<u64>,
+    /// Global cache size cap in bytes (optional).
+    pub cache_max_total_bytes: Option<u64>,
+    /// Maximum number of cached entries (optional).
+    pub cache_max_entries: Option<u64>,
+    /// Eviction policy for the disk cache (optional, default: lru).
+    pub cache_eviction_policy: Option<CacheEvictionPolicy>,
+    /// Hard cap for TTL in seconds when headers are missing (optional).
+    pub cache_max_ttl_secs: Option<u64>,
+    /// Evict entries if not accessed for this many seconds (optional).
+    pub cache_inactive_secs: Option<u64>,
 }
 
 impl Default for HttpConfig {
@@ -54,6 +70,11 @@ impl Default for HttpConfig {
             cache_dir: None,
             cache_default_ttl_secs: None,
             cache_max_object_bytes: None,
+            cache_max_total_bytes: None,
+            cache_max_entries: None,
+            cache_eviction_policy: None,
+            cache_max_ttl_secs: None,
+            cache_inactive_secs: None,
         }
     }
 }
@@ -121,6 +142,28 @@ impl HttpConfig {
 
     pub fn cache_max_object_bytes(&self) -> Option<u64> {
         self.cache_max_object_bytes
+    }
+
+    pub fn cache_max_total_bytes(&self) -> Option<u64> {
+        self.cache_max_total_bytes
+    }
+
+    pub fn cache_max_entries(&self) -> Option<usize> {
+        self.cache_max_entries
+            .and_then(|val| usize::try_from(val).ok())
+    }
+
+    pub fn cache_eviction_policy(&self) -> CacheEvictionPolicy {
+        self.cache_eviction_policy
+            .unwrap_or(CacheEvictionPolicy::Lru)
+    }
+
+    pub fn cache_max_ttl_secs(&self) -> Option<u64> {
+        self.cache_max_ttl_secs
+    }
+
+    pub fn cache_inactive_secs(&self) -> Option<u64> {
+        self.cache_inactive_secs
     }
 
     pub(crate) fn apply_cache_defaults(&mut self) {
