@@ -10,7 +10,7 @@ cd migux
 cargo run
 ```
 
-It tries to load `migux.conf` from the current working directory; if the file is missing or invalid, it falls back to built-in defaults.
+It tries to load `migux.conf` from the current working directory. If the file is missing or can't be parsed, it falls back to built-in defaults. After loading, Migux validates the config: warnings are printed, and errors stop startup.
 
 ## Architecture overview
 
@@ -63,7 +63,7 @@ type = "static"
 
 ### Example config (migux.conf style)
 
-```toml
+```ini
 # -------- global --------
 [global]
 # Number of worker processes.
@@ -142,6 +142,9 @@ key_path = "/etc/migux/certs/privkey.pem"
 redirect_http = true
 # Enable HTTP/2 via ALPN.
 http2 = true
+; Optional HSTS (Strict-Transport-Security) header.
+hsts_max_age_secs = 31536000
+hsts_include_subdomains = true
 
 # -------- locations --------
 [location.main_root]
@@ -191,6 +194,7 @@ cache = false
 ## TLS termination (optional)
 
 If configured, Migux can terminate HTTPS and (optionally) redirect HTTP to HTTPS.
+When HSTS is enabled, Migux injects the `Strict-Transport-Security` header on TLS responses (if upstream/static responses don't already include it).
 
 Example:
 
@@ -201,6 +205,8 @@ cert_path = "/etc/migux/certs/fullchain.pem"
 key_path = "/etc/migux/certs/privkey.pem"
 redirect_http = true
 http2 = true
+hsts_max_age_secs = 31536000
+hsts_include_subdomains = true
 ```
 
 Test HTTP/2 (requires TLS):
