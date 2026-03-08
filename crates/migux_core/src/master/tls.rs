@@ -1,7 +1,7 @@
 use std::{fs::File, io::BufReader, sync::Arc};
 
 use migux_config::TlsConfig;
-use tokio_rustls::{rustls, TlsAcceptor};
+use tokio_rustls::{TlsAcceptor, rustls};
 use tracing::warn;
 
 use crate::types::TlsListenConfig;

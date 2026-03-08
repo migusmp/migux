@@ -360,19 +360,19 @@ fn is_valid_host(host: &str) -> bool {
     if host.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return false;
     }
-    host.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '.' | '-' | ':' | '[' | ']' | '_')
-    })
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']' | '_'))
 }
 
 fn is_valid_token(token: &str) -> bool {
-    token.chars().all(|c| matches!(c,
-        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~'
-            | '0'..='9'
-            | 'a'..='z'
-            | 'A'..='Z'
-    ))
+    token.chars().all(|c| {
+        matches!(c,
+            '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~'
+                | '0'..='9'
+                | 'a'..='z'
+                | 'A'..='Z'
+        )
+    })
 }
 
 #[cfg(test)]
@@ -402,17 +402,20 @@ mod tests {
 
     #[test]
     fn parse_request_metadata_connection_tokens() {
-        let headers = "GET / HTTP/1.1\r\nHost: example\r\nConnection: \"keep-alive\", close\r\n\r\n";
+        let headers =
+            "GET / HTTP/1.1\r\nHost: example\r\nConnection: \"keep-alive\", close\r\n\r\n";
         let meta = parse_request_metadata(headers).expect("expected ok");
         assert!(meta.close_after);
     }
 
     #[test]
     fn parse_request_metadata_rejects_transfer_encoding_with_content_length() {
-        let headers =
-            "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: gzip, \"chunked\"\r\nContent-Length: 10\r\n\r\n";
+        let headers = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: gzip, \"chunked\"\r\nContent-Length: 10\r\n\r\n";
         let err = parse_request_metadata(headers).unwrap_err();
-        assert!(matches!(err, HeaderParseError::TransferEncodingContentLength));
+        assert!(matches!(
+            err,
+            HeaderParseError::TransferEncodingContentLength
+        ));
     }
 
     #[test]

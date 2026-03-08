@@ -121,8 +121,9 @@ impl Proxy {
         let max_resp_headers = cfg.http.max_upstream_response_headers_bytes as usize;
         let max_resp_body = cfg.http.max_upstream_response_body_bytes as usize;
 
-        // 4) strip_prefix para upstream path
-        let upstream_path = path::strip_prefix_path(req_path, &location.path);
+        // 4) strip_prefix para upstream path (usa location.strip_prefix si está definido, si no location.path)
+        let prefix = location.strip_prefix().unwrap_or(location.path());
+        let upstream_path = path::strip_prefix_path(req_path, prefix);
 
         debug!(
             target: "migux::proxy",

@@ -4,9 +4,9 @@ use migux_proxy::Proxy;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+use super::Master;
 use super::accept::{accept_loop, accept_loop_tls, bind_listener};
 use super::tls::{load_tls_acceptor, tls_listener_ready};
-use super::Master;
 
 impl Master {
     pub(super) async fn spawn_http_listeners(
@@ -31,9 +31,7 @@ impl Master {
 
             tokio::spawn(async move {
                 let listen_for_log = addr.clone();
-                if let Err(e) =
-                    accept_loop(listener, addr, semaphore, servers, proxy, cfg).await
-                {
+                if let Err(e) = accept_loop(listener, addr, semaphore, servers, proxy, cfg).await {
                     error!(
                         target: "migux::master",
                         listen = %listen_for_log,
@@ -92,16 +90,9 @@ impl Master {
 
             tokio::spawn(async move {
                 let listen_for_log = addr.clone();
-                if let Err(e) = accept_loop_tls(
-                    listener,
-                    addr,
-                    tls_acceptor,
-                    semaphore,
-                    servers,
-                    proxy,
-                    cfg,
-                )
-                .await
+                if let Err(e) =
+                    accept_loop_tls(listener, addr, tls_acceptor, semaphore, servers, proxy, cfg)
+                        .await
                 {
                     error!(
                         target: "migux::master",

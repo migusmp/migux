@@ -193,6 +193,10 @@ impl ResponseBuilder {
 
     /// Build a 500 response with a plain-text body.
     pub(crate) fn internal_error(keep_alive: bool) -> Vec<u8> {
-        Self::plain_text("500 Internal Server Error", "500 Internal Server Error", keep_alive)
+        Self::plain_text(
+            "500 Internal Server Error",
+            "500 Internal Server Error",
+            keep_alive,
+        )
     }
 }

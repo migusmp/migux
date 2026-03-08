@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 use migux_config::MiguxConfig;
 use tracing::{info, instrument};
 
-use crate::{build_servers_by_listen, build_tls_servers_by_listen, ServersByListen};
+use crate::{ServersByListen, build_servers_by_listen, build_tls_servers_by_listen};
 
 pub use crate::structs::CacheStore;
 

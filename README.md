@@ -10,7 +10,7 @@ cd migux
 cargo run
 ```
 
-It tries to load `migux.conf` from the current working directory. If the file is missing or can't be parsed, it falls back to built-in defaults. After loading, Migux validates the config: warnings are printed, and errors stop startup.
+It tries to load the config from (in order): the `MIGUX_CONFIG` environment variable, the path given by `-c`/`--config` (e.g. `migux -c /etc/migux.conf`), or `migux.conf` in the current working directory. If the file is missing or can't be parsed, it falls back to built-in defaults. After loading, Migux validates the config: warnings are printed, and errors stop startup.
 
 ## Architecture overview
 
@@ -169,7 +169,7 @@ server = "main"
 path = "/api"
 type = "proxy"
 upstream = "app"
-# Parsed but not used yet.
+# Path prefix to strip before forwarding (e.g. /api/users -> /users). If unset, location.path is used.
 strip_prefix = "/api"
 # Enable/disable static cache for this location.
 cache = false
@@ -178,7 +178,7 @@ cache = false
 ## Proxy behavior
 
 - **Routing**: selects an upstream by round-robin (if configured) and skips down nodes.
-- **Prefix strip**: uses `location.path` to strip prefix (nginx-like).
+- **Prefix strip**: uses `location.strip_prefix` when set, otherwise `location.path`, to strip the prefix from the request path before forwarding to the upstream (nginx-like).
 - **Headers**:
   - Removes hop-by-hop headers.
   - Adds `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, `X-Forwarded-Host`.
@@ -236,5 +236,4 @@ Helpers exist for: 404, 405, 408, 413, 431, 500, 502, 501.
 ## Limitations / TODO
 
 - HTTP/2 is supported only over TLS (ALPN). Cleartext h2c is not supported.
-- `strip_prefix` config is parsed but not used yet (uses `location.path`).
 - Cache config is wired for static GETs only (proxy/cache not wired yet).

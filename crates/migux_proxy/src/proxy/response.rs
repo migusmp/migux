@@ -105,7 +105,10 @@ fn headers_contain_hsts(headers_bytes: &[u8]) -> bool {
             continue;
         }
         if let Some((name, _)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("strict-transport-security") {
+            if name
+                .trim()
+                .eq_ignore_ascii_case("strict-transport-security")
+            {
                 return true;
             }
         }

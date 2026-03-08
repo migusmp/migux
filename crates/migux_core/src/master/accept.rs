@@ -7,7 +7,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, instrument};
 
-use crate::{http2::serve_h2_connection, worker::handle_connection, ServerRuntime};
+use crate::{ServerRuntime, http2::serve_h2_connection, worker::handle_connection};
 
 pub(crate) async fn bind_listener(
     listen_addr: &str,
@@ -122,8 +122,11 @@ pub(crate) async fn accept_loop(
     );
 
     loop {
-        let AcceptedConn { stream, addr, permit } =
-            accept_with_permit(&listener, &listen_addr, &semaphore, "http").await?;
+        let AcceptedConn {
+            stream,
+            addr,
+            permit,
+        } = accept_with_permit(&listener, &listen_addr, &semaphore, "http").await?;
 
         let servers_clone = servers.clone();
         let proxy_clone = proxy.clone();
@@ -201,8 +204,11 @@ pub(crate) async fn accept_loop_tls(
     );
 
     loop {
-        let AcceptedConn { stream, addr, permit } =
-            accept_with_permit(&listener, &listen_addr, &semaphore, "tls").await?;
+        let AcceptedConn {
+            stream,
+            addr,
+            permit,
+        } = accept_with_permit(&listener, &listen_addr, &semaphore, "tls").await?;
 
         let servers_clone = servers.clone();
         let proxy_clone = proxy.clone();
