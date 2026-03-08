@@ -9,8 +9,8 @@ use migux_config::{HttpConfig, LocationConfig, ServerConfig};
 use crate::cache::{
     CacheKey, CachePolicy, DiskCache, MemoryCache, build_cache_key, cache_metrics_snapshot,
 };
-use crate::conditional::should_return_not_modified;
-use crate::etag::{EtagInfo, last_modified_header, weak_etag_size_mtime};
+use crate::conditional::{should_return_not_modified, should_return_not_modified_if_modified_since};
+use crate::etag::{EtagInfo, last_modified_header, last_modified_system_time, weak_etag_size_mtime};
 use crate::fs::PathResolver;
 use crate::response::ResponseBuilder;
 
@@ -23,6 +23,8 @@ struct StaticFileInfo {
     content_length: usize,
     etag: EtagInfo,
     last_modified: Option<String>,
+    /// File mtime for If-Modified-Since comparison.
+    file_mtime: Option<SystemTime>,
 }
 
 struct ResolvedFile {
@@ -44,10 +46,12 @@ impl StaticFileInfo {
         let content_length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         let etag = weak_etag_size_mtime(metadata);
         let last_modified = last_modified_header(metadata);
+        let file_mtime = last_modified_system_time(metadata);
         Self {
             content_length,
             etag,
             last_modified,
+            file_mtime,
         }
     }
 }
@@ -484,11 +488,15 @@ impl<'a> StaticService<'a> {
         keep_alive: bool,
         hsts: Option<&str>,
     ) -> Option<Vec<u8>> {
+        // RFC 7232: If-None-Match takes precedence; if present and matching, return 304.
         if should_return_not_modified(method, headers, &file.info.etag.value) {
-            Some(build_not_modified(&file.info, keep_alive, hsts))
-        } else {
-            None
+            return Some(build_not_modified(&file.info, keep_alive, hsts));
         }
+        // If-Modified-Since: return 304 when file not modified since the given date.
+        if should_return_not_modified_if_modified_since(method, headers, file.info.file_mtime) {
+            return Some(build_not_modified(&file.info, keep_alive, hsts));
+        }
+        None
     }
 
     fn head_response(&self, file: &ResolvedFile, keep_alive: bool, hsts: Option<&str>) -> Vec<u8> {

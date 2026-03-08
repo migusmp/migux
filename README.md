@@ -225,7 +225,8 @@ curl --http2 -k https://localhost:8443/
 
 - Resolves files based on `root` and `index`.
 - Uses MIME type detection.
- - Respects HTTP/1 keep-alive (`Connection: keep-alive` / `close`).
+- **Conditional requests**: sends `Last-Modified` (file mtime) and `ETag`; returns **304 Not Modified** when the client sends `If-None-Match` (ETag match) or `If-Modified-Since` (file unchanged since that date). If-None-Match takes precedence (RFC 7232).
+- Respects HTTP/1 keep-alive (`Connection: keep-alive` / `close`).
 - Disk-backed cache (optional): stores `.cache` and `.meta` files under `cache_dir` and also keeps a memory copy for hot hits.
 - Cache supports TTL, global size cap, and LRU eviction on disk.
 

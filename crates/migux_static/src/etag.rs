@@ -1,4 +1,4 @@
-use std::{fs::Metadata, time::UNIX_EPOCH};
+use std::{fs::Metadata, time::SystemTime, time::UNIX_EPOCH};
 
 pub struct EtagInfo {
     pub value: String,
@@ -27,4 +27,9 @@ pub fn weak_etag_size_mtime(metadata: &Metadata) -> EtagInfo {
 
 pub fn last_modified_header(metadata: &Metadata) -> Option<String> {
     metadata.modified().ok().map(httpdate::fmt_http_date) // -> String RFC1123 en GMT
+}
+
+/// Returns the file's modification time for comparison with If-Modified-Since.
+pub fn last_modified_system_time(metadata: &Metadata) -> Option<SystemTime> {
+    metadata.modified().ok()
 }

@@ -4,6 +4,7 @@ enum IfNoneMatch {
     Tags(Vec<String>),
 }
 
+/// Returns true if the request is GET/HEAD with If-None-Match matching the current ETag (→ 304).
 pub(crate) fn should_return_not_modified(method: &str, headers: &str, etag_value: &str) -> bool {
     if method != "GET" && method != "HEAD" {
         return false;
@@ -100,10 +101,61 @@ fn if_none_match_satisfied(if_none_match: &IfNoneMatch, etag_value: &str) -> boo
     }
 }
 
+/// Returns true if the request is GET/HEAD with If-Modified-Since and the file was not
+/// modified since that date (→ 304). Only considered when If-None-Match is not used (RFC 7232).
+/// File mtime is compared at 1-second granularity (HTTP-date has no subseconds).
+pub(crate) fn should_return_not_modified_if_modified_since(
+    method: &str,
+    headers: &str,
+    file_mtime: Option<std::time::SystemTime>,
+) -> bool {
+    if method != "GET" && method != "HEAD" {
+        return false;
+    }
+    let Some(client_date) = parse_if_modified_since(headers) else {
+        return false;
+    };
+    let Some(mtime) = file_mtime else {
+        return false;
+    };
+    // HTTP-date has second precision; truncate file mtime to seconds so comparison matches
+    // what we send in Last-Modified (e.g. client echoes "Fri, 08 Mar 2025 12:34:56 GMT").
+    let mtime_secs = truncate_to_seconds(mtime);
+    mtime_secs <= client_date
+}
+
+fn truncate_to_seconds(t: std::time::SystemTime) -> std::time::SystemTime {
+    use std::time::UNIX_EPOCH;
+    let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs();
+    UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+fn parse_if_modified_since(headers: &str) -> Option<std::time::SystemTime> {
+    for line in headers.lines().skip(1) {
+        let line = line.trim_end_matches('\r').trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("if-modified-since") {
+            let value = value.trim().trim_end_matches('\r');
+            if value.is_empty() {
+                return None;
+            }
+            return httpdate::parse_http_date(value).ok();
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        IfNoneMatch, if_none_match_satisfied, parse_if_none_match, parse_if_none_match_value,
+        IfNoneMatch, if_none_match_satisfied, parse_if_modified_since, parse_if_none_match,
+        parse_if_none_match_value, should_return_not_modified_if_modified_since,
     };
 
     #[test]
@@ -137,5 +189,37 @@ mod tests {
         let headers = "GET / HTTP/1.1\r\nHost: example\r\nIf-None-Match: \"etag\"\r\n\r\n";
         let parsed = parse_if_none_match(headers).expect("expected header value");
         assert!(if_none_match_satisfied(&parsed, "etag"));
+    }
+
+    #[test]
+    fn parse_if_modified_since_header() {
+        let headers = "GET / HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: Fri, 15 May 2015 15:34:21 GMT\r\n\r\n";
+        let t = parse_if_modified_since(headers).expect("expected date");
+        let formatted = httpdate::fmt_http_date(t);
+        assert_eq!(formatted, "Fri, 15 May 2015 15:34:21 GMT");
+    }
+
+    #[test]
+    fn should_304_if_modified_since_same_or_later() {
+        let headers = "GET / HTTP/1.1\r\nIf-Modified-Since: Fri, 15 May 2015 15:34:21 GMT\r\n\r\n";
+        let file_mtime = httpdate::parse_http_date("Fri, 15 May 2015 15:34:21 GMT").ok();
+        assert!(should_return_not_modified_if_modified_since("GET", headers, file_mtime));
+
+        let file_mtime_earlier = httpdate::parse_http_date("Thu, 14 May 2015 12:00:00 GMT").ok();
+        assert!(should_return_not_modified_if_modified_since("GET", headers, file_mtime_earlier));
+    }
+
+    #[test]
+    fn should_not_304_if_modified_since_older() {
+        let headers = "GET / HTTP/1.1\r\nIf-Modified-Since: Fri, 15 May 2015 15:34:21 GMT\r\n\r\n";
+        let file_mtime = httpdate::parse_http_date("Sat, 16 May 2015 10:00:00 GMT").ok();
+        assert!(!should_return_not_modified_if_modified_since("GET", headers, file_mtime));
+    }
+
+    #[test]
+    fn if_modified_since_ignored_for_post() {
+        let headers = "POST / HTTP/1.1\r\nIf-Modified-Since: Fri, 15 May 2015 15:34:21 GMT\r\n\r\n";
+        let file_mtime = httpdate::parse_http_date("Fri, 15 May 2015 15:34:21 GMT").ok();
+        assert!(!should_return_not_modified_if_modified_since("POST", headers, file_mtime));
     }
 }
